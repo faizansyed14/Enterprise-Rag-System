@@ -1,0 +1,26 @@
+# Prometheus for the optional "monitoring" profile (scripts/monitoring.sh start).
+# The API's /metrics endpoint serves figures from the shared database rollups, so one scrape covers every API and
+# worker process. Set PROMETHEUS_METRICS=true (the compose default) and, optionally, METRICS_TOKEN: then uncomment
+# the authorization block and put the same token in deploy/prometheus/metrics_token.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: rag-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/metrics_token
+
+  # Qdrant's own metrics (requests, collections, memory). Qdrant requires its API key on /metrics: put QDRANT_API_KEY
+  # in deploy/prometheus/qdrant_api_key, mount it next to prometheus.yml, then uncomment this job.
+  # - job_name: qdrant
+  #   metrics_path: /metrics
+  #   authorization:
+  #     type: Bearer
+  #     credentials_file: /etc/prometheus/qdrant_api_key
+  #   static_configs:
+  #     - targets: ["qdrant:6333"]

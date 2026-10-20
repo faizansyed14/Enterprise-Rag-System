@@ -1,0 +1,9 @@
+node_modules/
+.next/
+out/
+test-results/
+screenshots/
+*.tsbuildinfo
+next-env.d.ts
+# generated at build time from icon packages (scripts/brand-icons.mjs)
+src/components/brand/marks.generated.ts

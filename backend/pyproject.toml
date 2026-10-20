@@ -1,0 +1,121 @@
+[project]
+name = "rag-enterprise"
+version = "2.0.0"
+description = "Enterprise retrieval-augmented generation for construction document libraries"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "psycopg[binary,pool]>=3.2.3",
+    "alembic>=1.14",
+    "qdrant-client>=1.12",
+    "httpx>=0.27",
+    "pypdfium2>=4.30",
+    "pdfplumber>=0.11.4",
+    "python-docx>=1.1.2",
+    "openpyxl>=3.1.5",
+    "python-pptx>=1.0.2",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "filetype>=1.2",
+    "rapidfuzz>=3.10",
+    "snowballstemmer>=2.2",
+    "mmh3>=5.0",
+    "argon2-cffi>=23.1",
+    "pyjwt[crypto]>=2.10",
+    "prometheus-client>=0.21",
+    "numpy>=1.26",
+    "pillow>=11.0",
+    "pyyaml>=6.0.2",
+    "typer>=0.15",
+    "python-multipart>=0.0.18",
+    "python-dateutil>=2.9",
+    "smbprotocol>=1.14",
+    "tokenizers>=0.20",
+    "wordninja>=2.0",
+    # layout engine (rag.providers.parsers.layout)
+    "regex>=2024.0.0",
+    "sortedcontainers>=2.4.0",
+    "PyPDF2>=3.0.0",
+]
+
+[project.optional-dependencies]
+# Local OCR (RapidOCR ships its ONNX detection/recognition models inside the wheel).
+ocr = ["rapidocr-onnxruntime>=1.4.4", "opencv-python-headless>=4.10"]
+# S3 / MinIO object store for originals.
+s3 = ["boto3>=1.35"]
+# Outlook .msg files.
+msg = ["extract-msg>=0.52"]
+# `rag demo seed`: writes the sample library (PDFs are drawn with ReportLab).
+demo = ["reportlab>=4.2"]
+
+[project.scripts]
+rag = "rag.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.21",
+    "ruff>=0.8",
+    "bandit>=1.8",
+    "pip-audit>=2.7",
+    "reportlab>=4.2",
+    "rag-model-server",
+]
+
+[tool.uv.sources]
+rag-model-server = { path = "model_server", editable = true }
+
+[tool.uv]
+# RapidOCR asks for the desktop OpenCV build, which needs GUI libraries (libGL, X11) a server image should not carry.
+# The headless build provides the same cv2 module, so the desktop one is never installed.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+src = ["src", "../tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "BLE", "UP", "S", "ASYNC", "C4", "SIM", "RUF", "PTH", "N", "T20", "PL", "TRY", "PERF"]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",  # complexity budgets are enforced in review, not by counts
+    "TRY003", "TRY300", "TRY400",
+    "S101",       # asserts are used in tests
+    "RUF001", "RUF002", "RUF003",  # Arabic text in strings and comments is intentional
+    "PLC0415",    # lazy imports keep optional providers optional
+    "PLW0603",    # module-level singletons are set in one place
+    "B008",       # FastAPI dependency injection uses calls in defaults
+    "N818",       # exception names describe the condition (RateLimited, NotReady)
+    "SIM905",     # word lists written as one string read better than long list literals
+    "ASYNC109",   # provider calls take an explicit timeout that is passed to httpx
+    "TRY301",     # raising inside try blocks is used deliberately to route errors through one handler
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/rag/metadata/vocabularies.py" = ["E501"]
+# Test-data generator: compact drawing code, fixed seeds (not security-relevant randomness).
+"src/rag/evaluation/bench_corpus.py" = ["E", "N", "S", "SIM", "RUF", "PERF", "PLW", "B", "C4", "PTH"]
+"alembic/versions/*" = ["E501"]
+"../tests/**" = ["S", "PLR", "T20", "N", "PTH", "B", "SIM", "TRY", "PERF", "RUF", "ASYNC"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+# B101 asserts are used for invariants; B608 flags SQL assembled from fixed fragments (every value is a bound parameter;
+# each site was reviewed); B311 is retry jitter, not a security use of random; B404/B603 run LibreOffice with a fixed argv;
+# B112 skips a malformed PDF region on purpose.
+skips = ["B101", "B608", "B311", "B404", "B603", "B112"]

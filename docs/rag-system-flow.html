@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Al Ain RAG — End-to-end system flow</title>
+  <style>
+    :root {
+      --ink: #17212b;
+      --muted: #5b6875;
+      --line: #d9e1e8;
+      --paper: #f7f9fb;
+      --card: #ffffff;
+      --navy: #18324a;
+      --blue: #2f6f9f;
+      --blue-soft: #edf5fb;
+      --green: #3e7b62;
+      --green-soft: #eef7f2;
+      --amber: #9a6a25;
+      --amber-soft: #fff7e8;
+      --purple: #67518d;
+      --purple-soft: #f4f0fb;
+      --shadow: 0 8px 24px rgba(18, 39, 57, .07);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; background: #f2f5f7; }
+    .shell { max-width: 1320px; margin: 0 auto; padding: 30px 24px 64px; }
+    .hero {
+      display: grid; grid-template-columns: 1fr auto; gap: 28px; align-items: end;
+      padding: 30px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--shadow);
+    }
+    .eyebrow { margin: 0 0 8px; color: var(--blue); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 0; color: var(--navy); font-size: clamp(30px, 4vw, 52px); line-height: 1.03; letter-spacing: -.035em; }
+    h2 { margin: 0 0 8px; color: var(--navy); font-size: 26px; letter-spacing: -.02em; }
+    h3 { margin: 0 0 7px; color: var(--navy); font-size: 17px; }
+    p { margin: 7px 0; }
+    .lede { max-width: 780px; margin-top: 15px; color: var(--muted); font-size: 17px; }
+    .hero-note { max-width: 270px; padding: 14px 16px; border-left: 3px solid var(--blue); background: var(--blue-soft); color: #294a63; }
+    .nav { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 30px; padding: 10px 0; background: rgba(247,249,251,.94); backdrop-filter: blur(8px); }
+    .nav a { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--muted); font-size: 13px; }
+    .nav a:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
+    section { margin: 34px 0 0; }
+    .section-head { display: flex; justify-content: space-between; gap: 18px; align-items: baseline; margin-bottom: 14px; }
+    .section-head p { color: var(--muted); }
+    .flow { display: flex; flex-direction: column; gap: 0; }
+    .step {
+      position: relative; display: grid; grid-template-columns: 58px 1fr; gap: 16px; align-items: start;
+      padding: 18px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 2px 8px rgba(18,39,57,.035);
+    }
+    .step + .step { margin-top: 24px; }
+    .step + .step::before { content: ""; position: absolute; top: -25px; left: 28px; height: 24px; border-left: 2px solid #bdcbd6; }
+    .step + .step::after { content: ""; position: absolute; top: -4px; left: 23px; width: 9px; height: 9px; border-right: 2px solid #bdcbd6; border-bottom: 2px solid #bdcbd6; transform: rotate(45deg); }
+    .num { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: var(--navy); color: white; font-weight: 800; }
+    .step-title { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; letter-spacing: .02em; }
+    .tag.required { color: #2e684e; background: var(--green-soft); }
+    .tag.optional { color: #79551f; background: var(--amber-soft); }
+    .tag.query { color: #59447d; background: var(--purple-soft); }
+    .tag.storage { color: #285a80; background: var(--blue-soft); }
+    .refs { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .refs a { white-space: nowrap; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 2px 8px rgba(18,39,57,.035); }
+    .card p { color: var(--muted); }
+    .card ul, .step ul { margin: 9px 0 0; padding-left: 20px; }
+    .card li, .step li { margin: 4px 0; }
+    .branch { margin: 16px 0 0; padding: 15px; border: 1px dashed #b9c8d3; border-radius: 10px; background: #fbfcfd; }
+    .branch h4 { margin: 0 0 8px; color: var(--navy); font-size: 14px; }
+    .route { display: grid; grid-template-columns: 1fr 28px 1fr; gap: 10px; align-items: center; }
+    .route-arrow { color: #9cabb6; text-align: center; font-size: 22px; }
+    .route-box { min-height: 100%; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: white; }
+    .route-box strong { display: block; margin-bottom: 4px; color: var(--navy); }
+    .storage-map { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; align-items: stretch; }
+    .storage-node { padding: 20px; border: 1px solid var(--line); background: white; }
+    .storage-node:first-child { border-radius: 12px 0 0 12px; }
+    .storage-node:last-child { border-radius: 0 12px 12px 0; }
+    .storage-node + .storage-node { border-left: 0; }
+    .storage-node h3 { display: flex; align-items: center; gap: 8px; }
+    .storage-node .icon { display: inline-grid; place-items: center; width: 27px; height: 27px; border-radius: 7px; background: var(--blue-soft); color: var(--blue); font-weight: 800; }
+    .callout { margin: 15px 0 0; padding: 14px 16px; border-left: 3px solid var(--amber); border-radius: 0 8px 8px 0; background: var(--amber-soft); color: #61471f; }
+    .query-flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
+    .query-node { position: relative; padding: 15px; border: 1px solid #d8cce9; border-radius: 10px; background: var(--purple-soft); }
+    .query-node:not(:last-child)::after { content: "→"; position: absolute; right: -22px; top: 34px; color: #9e90b7; font-size: 20px; z-index: 1; }
+    .query-node strong { display: block; color: #4e3c70; }
+    .subflow { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+    .subflow .card { border-top: 3px solid var(--blue); }
+    .footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .tree { padding: 24px 26px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: var(--shadow); }
+    .tree, .tree ul { list-style: none; }
+    .tree ul { position: relative; margin: 0; padding-left: 28px; }
+    .tree > ul { padding-left: 0; }
+    .tree li { position: relative; margin: 9px 0; padding-left: 28px; }
+    .tree > ul > li { padding-left: 0; }
+    .tree ul ul::before { content: "; position: absolute; top: 0; bottom: 16px; left: 10px; border-left: 1px solid #bdcbd6; }
+    .tree li::before { content: "; position: absolute; top: 18px; left: 0; width: 20px; border-top: 1px solid #bdcbd6; }
+    .tree > ul > li::before { display: none; }
+    .tree .node { display: inline-block; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: #fbfcfd; }
+    .tree .node strong { color: var(--navy); }
+    .tree .stage { border-color: #b8d1e2; background: var(--blue-soft); }
+    .tree .branch-node { border-color: #dccb9d; background: var(--amber-soft); }
+    .tree .store-node { border-color: #b8d8c6; background: var(--green-soft); }
+    .tree .question-node { border-color: #d8cce9; background: var(--purple-soft); }
+    .tree .detail { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: var(--blue); font-weight: 700; }
+    @media (max-width: 900px) {
+      .hero, .grid, .grid.two, .storage-map, .query-flow, .subflow { grid-template-columns: 1fr; }
+      .hero-note { max-width: none; }
+      .storage-node, .storage-node + .storage-node { border-left: 1px solid var(--line); border-radius: 0; }
+      .storage-node:first-child { border-radius: 12px 12px 0 0; }
+      .storage-node:last-child { border-radius: 0 0 12px 12px; }
+      .query-node:not(:last-child)::after { content: "↓"; right: auto; left: 50%; top: auto; bottom: -24px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Al Ain RAG Enterprise · code-guided architecture</p>
+        <h1>From source file to cited answer</h1>
+        <p class="lede">A visual map of the current application: how a file enters through connectors or upload, how each document type is parsed and stored, how chunks become searchable vectors, and what happens when a user asks a question.</p>
+      </div>
+      <div class="hero-note"><strong>How to read this page</strong><br>Solid cards are normal stages. Dashed cards are optional or fallback routes. Blue is ingestion/storage; purple is the question path; green marks a publish or access boundary.</div>
+    </header>
+
+    <nav class="nav" aria-label="Page sections">
+      <a href="#map">At a glance</a>
+      <a href="#tree">Flow tree</a><a href="#ingestion">Ingestion</a>
+      <a href="#parsing">Parsing routes</a>
+      <a href="#storage">Storage</a>
+      <a href="#query">Question path</a>
+      <a href="#answer">Answer path</a>
+      <a href="#files">Code map</a>
+    </nav>
+
+    <section id="map">
+      <div class="section-head"><div><h2>At a glance</h2><p>The two main flows meet at the live Qdrant collection.</p></div></div>
+      <div class="grid two">
+        <div class="card" style="border-top:3px solid var(--blue)">
+          <h3>Ingestion flow</h3>
+          <p>Discover → download → store original → parse → normalize metadata → chunk → embed/analyze → index → publish.</p>
+          <p class="refs"><a href="../backend/src/rag/ingestion/pipeline.py">pipeline.py</a> · <a href="../backend/src/rag/connectors/sharepoint.py">sharepoint.py</a> · <a href="../backend/src/rag/ingestion/chunker.py">chunker.py</a></p>
+        </div>
+        <div class="card" style="border-top:3px solid var(--purple)">
+          <h3>Question flow</h3>
+          <p>Authenticate → guardrail → route/rewrite → filtered hybrid retrieval → rerank/deduplicate → answer with evidence → verify citations → stream.</p>
+          <p class="refs"><a href="../backend/src/rag/answering/agent.py">agent.py</a> · <a href="../backend/src/rag/retrieval/retriever.py">retriever.py</a> · <a href="../backend/src/rag/answering/citations.py">citations.py</a></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="tree">
+      <div class="section-head"><div><h2>Human-readable flow tree</h2><p>Source -&gt; parser decision -&gt; stored evidence -&gt; index -&gt; answer.</p></div></div>
+      <div class="tree"><ul>
+        <li><span class="node stage"><strong>Document enters</strong><span class="detail">SharePoint / OneDrive Graph, filesystem / SMB, connector, or upload</span></span>
+          <ul>
+            <li><span class="node stage"><strong>Fetch + identify</strong><span class="detail">Bytes, SHA-256, format, ETag/path, ACL, idempotency</span></span></li>
+            <li><span class="node store-node"><strong>Original bytes</strong><span class="detail">Object storage + PostgreSQL blob metadata</span></span></li>
+            <li><span class="node stage"><strong>Format dispatch</strong><span class="detail">PDF, image, Office, text, email, HTML, ZIP, or legacy conversion</span></span>
+              <ul>
+                <li><span class="node branch-node"><strong>Digital PDF</strong><span class="detail">PDFium text/geometry, table rules, title block, optional deep layout</span></span></li>
+                <li><span class="node branch-node"><strong>Scanned/broken PDF</strong><span class="detail">Render -&gt; OCR role -&gt; local RapidOCR, Azure/Mistral, or VisionOCR</span></span></li>
+                <li><span class="node branch-node"><strong>Drawing sheet</strong><span class="detail">Whole-sheet OCR, then separate VISION sheet description when needed</span></span></li>
+                <li><span class="node branch-node"><strong>Embedded picture</strong><span class="detail">OCR qualifying image regions and merge with text layer</span></span></li>
+                <li><span class="node branch-node"><strong>Image / Office / email / ZIP</strong><span class="detail">Image frames OCR; native readers; attachments become child items</span></span></li>
+              </ul>
+            </li>
+            <li><span class="node stage"><strong>Canonical page</strong><span class="detail">Text, method, language, tables, lines/boxes, title block, quality, warnings</span></span>
+              <ul>
+                <li><span class="node question-node"><strong>OpenRouter OCR option</strong><span class="detail"><code>OCR=vision/default</code> + <code>VISION=openrouter/&lt;vendor&gt;/&lt;model&gt;</code> -&gt; image chat completion -&gt; Markdown -&gt; local RapidOCR fallback</span></span></li>
+                <li><span class="node branch-node"><strong>Privacy / budget / cache</strong><span class="detail">Sensitive pages can stay local; page budgets and image/OCR cache are checked</span></span></li>
+              </ul>
+            </li>
+            <li><span class="node stage"><strong>Enrich -&gt; chunk -&gt; embed</strong><span class="detail">Metadata, page-bounded chunks, headers/tables, dense/sparse representations</span></span></li>
+            <li><span class="node store-node"><strong>PostgreSQL + Qdrant</strong><span class="detail">Pages, versions, chunks, ACL/current state, versioned collection, live alias</span></span></li>
+          </ul>
+        </li>
+        <li><span class="node question-node"><strong>User question</strong><span class="detail">Auth -&gt; guardrail -&gt; route -&gt; filtered hybrid retrieval -&gt; answer -&gt; citations</span></span></li>
+      </ul></div>
+    </section>
+    <section id="ingestion">
+      <div class="section-head"><div><h2>1–9. Ingestion: source to searchable index</h2><p>The pipeline is asynchronous and idempotent. Each stage can be retried without intentionally duplicating the document.</p></div></div>
+      <div class="flow">
+        <article class="step"><div class="num">1</div><div><div class="step-title"><h3>Source event or upload arrives</h3><span class="tag required">entry</span></div><p>A scheduled connector sync, manual upload, or source refresh creates a remote item/job. The item carries a source identity, path/name, size, timestamps, ETag/change token, content type, and ACL principals.</p><ul><li>SharePoint document libraries and OneDrive for Business use Microsoft Graph.</li><li>Filesystem/SMB and legacy connectors are also available.</li><li>Uploads enter through the API and object-storage path.</li></ul><p class="refs"><a href="../backend/src/rag/connectors/base.py">connectors/base.py</a> · <a href="../backend/src/rag/connectors/sharepoint.py">connectors/sharepoint.py</a> · <a href="../backend/src/rag/api/routers/uploads.py">uploads.py</a></p></div></article>
+        <article class="step"><div class="num">2</div><div><div class="step-title"><h3>Acquire bytes and establish identity</h3><span class="tag required">idempotency</span></div><p>The connector downloads the raw file, computes a content hash, normalizes the source identity, and compares it with the last known item. Unchanged items can skip expensive parsing and embedding work; changed items create a new processing path.</p><ul><li>SharePoint/OneDrive content is a binary <code>driveItem</code> stream.</li><li>ACL changes are tracked separately from content changes.</li><li>Large files and retries are handled by job/connector limits.</li></ul><p class="refs"><a href="../backend/src/rag/ingestion/pipeline.py">pipeline.py</a> · <a href="../backend/src/rag/connectors/graph_client.py">graph_client.py</a> · <a href="../backend/src/rag/db/schema.py">schema.py</a></p></div></article>
+        <article class="step"><div class="num">3</div><div><div class="step-title"><h3>Store the original and source metadata</h3><span class="tag storage">durable source</span></div><p>The original bytes are retained in object storage. PostgreSQL stores the source, document identity, version/revision, file metadata, ACL principals, job state, hashes, and processing lineage. Qdrant is not the source of truth; it is a derived search index.</p><p class="refs"><a href="../backend/src/rag/providers/storage/objects.py">storage/objects.py</a> · <a href="../backend/src/rag/db/schema.py">db/schema.py</a></p></div></article>
+        <article class="step"><div class="num">4</div><div><div class="step-title"><h3>Classify the file and choose a parser route</h3><span class="tag required">dispatch</span></div><p>Content type, file extension, page characteristics, and configured parser decide which extraction branch is used. The result is page/section-oriented text and structure, not yet vector data.</p><div class="branch"><h4>Parser routes are shown in detail below</h4><p>Normal digital PDF, scanned PDF, image-only page, Office files, and optional cloud/layout parsers all converge into a common page/blocks representation.</p></div><p class="refs"><a href="../backend/src/rag/ingestion/formats.py">ingestion/formats.py</a> · <a href="../backend/src/rag/providers/parsers/pdf.py">parsers/pdf.py</a> · <a href="../backend/src/rag/providers/parsers/cloud.py">parsers/cloud.py</a></p></div></article>
+        <article class="step"><div class="num">5</div><div><div class="step-title"><h3>Normalize text, pages, tables, and metadata</h3><span class="tag required">canonical form</span></div><p>Extracted blocks are cleaned and labeled with page numbers, headings, table context, coordinates where available, language, and parser details. Metadata extraction identifies project, discipline, document number, title, dates, revision, references, and confidence.</p><ul><li>Identifiers and revision data help exact retrieval and “current revision” selection.</li><li>ACL principals stay attached to the document/version so they reach every chunk.</li><li>Low-quality or empty extraction can trigger OCR/fallback handling.</li></ul><p class="refs"><a href="../backend/src/rag/metadata/extract.py">metadata/extract.py</a> · <a href="../backend/src/rag/metadata/title_block.py">metadata/title_block.py</a> · <a href="../backend/src/rag/metadata/identifiers.py">metadata/identifiers.py</a></p></div></article>
+        <article class="step"><div class="num">6</div><div><div class="step-title"><h3>Chunk by structure and page boundary</h3><span class="tag required">retrieval units</span></div><p>The chunker keeps document headers, headings, page numbers, table labels, and nearby context. Chunks are token-limited and retain document/version/page/source references. Near-duplicate fingerprints support family detection and later ranking demotion.</p><p class="refs"><a href="../backend/src/rag/ingestion/chunker.py">ingestion/chunker.py</a> · <a href="../backend/src/rag/text/minhash.py">text/minhash.py</a></p></div></article>
+        <article class="step"><div class="num">7</div><div><div class="step-title"><h3>Create searchable representations</h3><span class="tag required">models</span></div><p>Each chunk gets multiple retrieval representations:</p><ul><li>Dense embedding from the configured embedder/model server, with the correct query/passage behavior.</li><li>Sparse BM25-style tokens/weights from the configured analyzer.</li><li>Exact identifier signals for document numbers, revisions, RFIs, and similar codes.</li></ul><p class="refs"><a href="../backend/src/rag/providers/embedders/local.py">embedders/local.py</a> · <a href="../backend/src/rag/model_server/engine.py">model_server/engine.py</a> · <a href="../backend/src/rag/text/bm25.py">text/bm25.py</a></p></div></article>
+        <article class="step"><div class="num">8</div><div><div class="step-title"><h3>Build a versioned Qdrant collection</h3><span class="tag storage">derived index</span></div><p>Vectors and payloads are written to a build-specific collection. Payloads include document/version/page/chunk identity, project/type/discipline, revision/current/published state, ACL principals, source, and text needed for evidence display. Payload indexes support filtered search.</p><p class="refs"><a href="../backend/src/rag/providers/vectorstore/qdrant.py">vectorstore/qdrant.py</a> · <a href="../backend/src/rag/ingestion/index_builds.py">ingestion/index_builds.py</a></p></div></article>
+        <article class="step"><div class="num">9</div><div><div class="step-title"><h3>Validate, publish, and expose the live alias</h3><span class="tag required">publish boundary</span></div><p>Build counts and consistency checks run before activation. The new collection is promoted through an alias/active-build record so readers see a complete index rather than a partially built one. Old builds can remain available for rollback or comparison.</p><div class="callout"><strong>Important separation:</strong> PostgreSQL records what the system believes is current and allowed; Qdrant accelerates retrieval. The final answer path rechecks critical access/current-version conditions before evidence is used.</div><p class="refs"><a href="../backend/src/rag/ingestion/index_builds.py">index_builds.py</a> · <a href="../backend/src/rag/ingestion/pipeline.py">pipeline.py</a></p></div></article>
+      </div>
+    </section>
+
+    <section id="parsing">
+      <div class="section-head"><div><h2>Parser routes: what happens to each file type?</h2><p>All routes eventually return page/section content for metadata extraction and chunking, but their evidence quality is different.</p></div></div>
+      <div class="grid two">
+        <div class="card">
+          <h3>Normal digital PDF</h3>
+          <p>Text exists in the PDF content stream, so OCR is not required.</p>
+          <div class="route"><div class="route-box"><strong>PDFium text / character extraction</strong>Reads text, coordinates, rotation, Unicode, reading geometry, and page boundaries.</div><div class="route-arrow">→</div><div class="route-box"><strong>Structure and layout</strong>Headings, columns, title blocks, table candidates, captions, and page blocks are assembled.</div></div>
+          <p class="refs"><a href="../backend/src/rag/providers/parsers/pdf.py">pdf.py</a> · <a href="../backend/src/rag/providers/parsers/layout_runner.py">layout_runner.py</a> · <a href="../backend/src/rag/providers/parsers/layout/main.py">layout/main.py</a></p>
+        </div>
+        <div class="card">
+          <h3>Digital PDF with tables</h3>
+          <p>Text extraction and table detection run together when table structure is available.</p>
+          <div class="route"><div class="route-box"><strong>Table candidate</strong>Ruled lines, cell geometry, captions, and neighboring text are identified.</div><div class="route-arrow">→</div><div class="route-box"><strong>Table block</strong>Rows/labels are represented as chunkable text with page provenance.</div></div>
+          <p class="refs"><a href="../backend/src/rag/providers/parsers/table_flow.py">table_flow.py</a> · <a href="../backend/src/rag/providers/parsers/table_quality.py">table_quality.py</a></p>
+        </div>
+        <div class="card">
+          <h3>Scanned PDF</h3>
+          <p>There is little or no selectable text, so pages are rendered or read as images.</p>
+          <div class="route"><div class="route-box"><strong>Page image</strong>Render the page or use the supplied image region.</div><div class="route-arrow">→</div><div class="route-box"><strong>OCR</strong>RapidOCR, Azure/Mistral OCR, or OCR=vision/default using the configured VISION model returns text and sometimes regions/coordinates. VisionOCR sends the image to the OpenAI-compatible endpoint, including OpenRouter, and falls back to local RapidOCR when it fails or returns empty text.</div></div>
+          <p class="refs"><a href="../backend/src/rag/providers/ocr/rapidocr.py">ocr/rapidocr.py</a> · <a href="../backend/src/rag/providers/ocr/cloud.py">ocr/cloud.py</a> · <a href="../backend/src/rag/providers/ocr/vision.py">ocr/vision.py</a></p>
+        </div>
+        <div class="card">
+          <h3>Image files / image-only pages</h3>
+          <p>Images follow the OCR role directly. OpenRouter is reached through the VISION role when OCR=vision/default is selected.</p>
+          <div class="route"><div class="route-box"><strong>Image safety and sizing</strong>Decode, resize, limit pixels, and select OCR/vision route.</div><div class="route-arrow">→</div><div class="route-box"><strong>Text + regions</strong>OCR output is normalized into the same page representation as PDF text.</div></div>
+          <p class="refs"><a href="../backend/src/rag/providers/ocr/vision.py">ocr/vision.py</a> · <a href="../backend/src/rag/ingestion/ocr_cache.py">ingestion/ocr_cache.py</a></p>
+        </div>
+        <div class="card">
+          <h3>OpenRouter OCR, exactly</h3>
+          <p>The code uses two roles: <code>VISION=openrouter/&lt;vendor&gt;/&lt;model&gt;</code> selects the vision chat model; <code>OCR=vision/default</code> makes the hub construct VisionOCR around it.</p>
+          <p>Its prompt requests exact Markdown transcription, headings, tables, figures, and handwriting. Image shrinking, privacy preflight, page budgets, OCR cache, and local fallback surround the model call.</p>
+          <p class="refs"><a href="../backend/src/rag/plugins/hub.py">plugins/hub.py</a> · <a href="../backend/src/rag/providers/ocr/vision.py">providers/ocr/vision.py</a> · <a href="../backend/src/rag/providers/llm/openai_compat.py">providers/llm/openai_compat.py</a></p>
+        </div>
+        <div class="card">
+          <h3>Word / Excel / PowerPoint</h3>
+          <p>Office parsers extract text, paragraphs, sheets, rows, cells, and presentation content. Office previews can be used where a visual representation is needed.</p>
+          <p class="refs"><a href="../backend/src/rag/ingestion/formats.py">ingestion/formats.py</a> · <a href="../backend/src/rag/ingestion/formats_extra.py">formats_extra.py</a> · <a href="../backend/src/rag/providers/parsers/office_preview.py">office_preview.py</a></p>
+        </div>
+        <div class="card">
+          <h3>Optional cloud/layout parser</h3>
+          <p>Azure Layout, LlamaParse, or Mistral adapters may be selected for difficult files. They are not required for the local path and their output is adapted into the common internal representation.</p>
+          <p class="refs"><a href="../backend/src/rag/providers/parsers/cloud.py">parsers/cloud.py</a> · <a href="../backend/src/rag/providers/parsers/layout/adapter.py">layout/adapter.py</a></p>
+        </div>
+      </div>
+      <div class="callout"><strong>Common convergence point:</strong> regardless of source type, the parser should produce page-aware text/blocks, table context, coordinates where available, extraction metadata, and quality signals. The chunker then creates the units that are embedded and searched.</div>
+    </section>
+
+    <section id="storage">
+      <div class="section-head"><div><h2>What is stored where?</h2><p>Three stores have different responsibilities; the vector database is not the archive.</p></div></div>
+      <div class="storage-map">
+        <div class="storage-node"><h3><span class="icon">01</span>Object storage</h3><p><strong>Original bytes</strong></p><ul><li>PDF, DOCX, XLSX, images, and other source files.</li><li>Content-addressed storage and download/replay source.</li><li>Used when a page preview or reprocessing is needed.</li></ul></div>
+        <div class="storage-node"><h3><span class="icon">02</span>PostgreSQL</h3><p><strong>System of record</strong></p><ul><li>Sources, documents, versions, revisions, pages, chunks, jobs, ACLs.</li><li>Current/published state and index-build metadata.</li><li>Evaluation runs, audit events, and operational state.</li></ul></div>
+        <div class="storage-node"><h3><span class="icon">03</span>Qdrant</h3><p><strong>Derived search index</strong></p><ul><li>Dense vectors and sparse vectors.</li><li>Payload filters for ACL, project, revision, source, type, and page.</li><li>Chunk text and provenance needed to return evidence.</li></ul></div>
+      </div>
+      <div class="callout"><strong>Rebuild rule:</strong> if parser, OCR, chunker, tokenizer, embedder, or analyzer behavior changes, the safe pattern is to build a new version, compare it, and activate it atomically. The original bytes must remain available for that rebuild.</div>
+    </section>
+
+    <section id="query">
+      <div class="section-head"><div><h2>Question path: request to evidence</h2><p>This is the live path after a user submits a question.</p></div></div>
+      <div class="query-flow">
+        <div class="query-node"><strong>1. API + identity</strong><p>Chat endpoint authenticates the user and resolves principals/groups.</p></div>
+        <div class="query-node"><strong>2. Guardrail</strong><p>Blocks unsafe questions and neutralizes unsafe evidence handling.</p></div>
+        <div class="query-node"><strong>3. Query router</strong><p>Rules classify language, identifiers, project/revision hints, follow-up context, and hard/research cases.</p></div>
+        <div class="query-node"><strong>4. Filter plan</strong><p>ACL, published/current version, project, type, date, source, and local-only constraints are prepared.</p></div>
+        <div class="query-node"><strong>5. Retriever</strong><p>Runs parallel retrieval legs and returns ranked documents/passages.</p></div>
+      </div>
+      <div class="subflow" style="margin-top:18px">
+        <div class="card"><h3>Dense leg</h3><p>Embed the query and search the dense Qdrant vector field for semantic similarity.</p></div>
+        <div class="card"><h3>Sparse leg</h3><p>BM25/analyzer search preserves exact terms, codes, names, and construction vocabulary.</p></div>
+        <div class="card"><h3>Exact / translated legs</h3><p>Identifier matching and translated sparse search help document numbers and cross-language queries.</p></div>
+        <div class="card"><h3>Post-processing</h3><p>Fuse, deduplicate, demote near-duplicate families, optionally rerank, recheck access/current state, cap passages, and expand same-page context.</p></div>
+      </div>
+      <p class="refs"><a href="../backend/src/rag/api/routers/chat.py">api/routers/chat.py</a> · <a href="../backend/src/rag/security/principals.py">security/principals.py</a> · <a href="../backend/src/rag/retrieval/query_router.py">retrieval/query_router.py</a> · <a href="../backend/src/rag/retrieval/retriever.py">retrieval/retriever.py</a></p>
+      <div class="callout"><strong>Evidence boundary:</strong> the answer model should only see passages returned for the user’s principals and filters. Retrieved source text is untrusted content; it is evidence, not instructions.</div>
+    </section>
+
+    <section id="answer">
+      <div class="section-head"><div><h2>Answer path: evidence to final response</h2><p>The answer is streamed, then checked before the request completes.</p></div></div>
+      <div class="flow">
+        <article class="step"><div class="num">A</div><div><div class="step-title"><h3>No evidence branch</h3><span class="tag query">abstain</span></div><p>If retrieval returns no passages, the agent emits a localized “not found” response and stops before generation.</p></div></article>
+        <article class="step"><div class="num">B</div><div><div class="step-title"><h3>Choose answer model</h3><span class="tag query">LLM_ANSWER</span></div><p>Normal questions use <code>LLM_ANSWER</code>; hard/multi-part/research questions can use <code>LLM_ANSWER_HARD</code>. If a cloud model is used, local-only documents are excluded by the plan.</p><p class="refs"><a href="../backend/src/rag/answering/agent.py">answering/agent.py</a> · <a href="../backend/src/rag/config/roles.py">config/roles.py</a></p></div></article>
+        <article class="step"><div class="num">C</div><div><div class="step-title"><h3>Build grounded prompt and stream</h3><span class="tag query">generation</span></div><p>The user question, conversation history, and sanitized evidence passages are placed into the answer prompt. The model streams answer deltas; an optional read-only research/tool loop can request more searches for hard questions.</p><p class="refs"><a href="../backend/src/rag/answering/prompts.py">answering/prompts.py</a> · <a href="../backend/src/rag/answering/tools.py">answering/tools.py</a> · <a href="../backend/src/rag/providers/llm/extractive.py">providers/llm/extractive.py</a></p></div></article>
+        <article class="step"><div class="num">D</div><div><div class="step-title"><h3>Strip markers and verify citations</h3><span class="tag required">post-check</span></div><p>Answer citations are parsed and matched back to the supplied passages. Each citation carries source/document/page information for the UI and audit trail.</p><p class="refs"><a href="../backend/src/rag/answering/citations.py">answering/citations.py</a></p></div></article>
+        <article class="step"><div class="num">E</div><div><div class="step-title"><h3>Run groundedness check and set status</h3><span class="tag required">post-check</span></div><p>The configured groundedness provider checks the answer against evidence. The result becomes <code>ok</code>, <code>unverified</code>, <code>not_found</code>, <code>refused</code>, or <code>error</code>, with citations and timing/usage attached.</p><p class="refs"><a href="../backend/src/rag/answering/grounding.py">answering/grounding.py</a> · <a href="../backend/src/rag/providers/groundedness/judges.py">providers/groundedness/judges.py</a></p></div></article>
+        <article class="step"><div class="num">F</div><div><div class="step-title"><h3>Return to the client</h3><span class="tag required">response</span></div><p>The API/SSE stream delivers status, answer deltas, citation events, and a final completion payload. Traces and metrics record plan, retrieval, generation, verification, latency, model, and counts without storing unnecessary question/answer text in telemetry.</p><p class="refs"><a href="../backend/src/rag/api/sse.py">api/sse.py</a> · <a href="../backend/src/rag/monitoring/tracing.py">monitoring/tracing.py</a> · <a href="../backend/src/rag/answering/agent.py">answering/agent.py</a></p></div></article>
+      </div>
+    </section>
+
+    <section id="files">
+      <div class="section-head"><div><h2>Code map: where to look first</h2><p>These are the files that define the main runtime flow; the repository also contains tests, cloud adapters, legacy connectors, and detailed layout-parser modules.</p></div></div>
+      <div class="grid">
+        <div class="card"><h3>Connectors and API</h3><ul><li><a href="../backend/src/rag/connectors/sharepoint.py">connectors/sharepoint.py</a></li><li><a href="../backend/src/rag/connectors/graph_client.py">connectors/graph_client.py</a></li><li><a href="../backend/src/rag/connectors/filesystem.py">connectors/filesystem.py</a></li><li><a href="../backend/src/rag/api/routers/uploads.py">api/routers/uploads.py</a></li><li><a href="../backend/src/rag/api/routers/chat.py">api/routers/chat.py</a></li></ul></div>
+        <div class="card"><h3>Ingestion and parsing</h3><ul><li><a href="../backend/src/rag/ingestion/pipeline.py">ingestion/pipeline.py</a></li><li><a href="../backend/src/rag/ingestion/formats.py">ingestion/formats.py</a></li><li><a href="../backend/src/rag/ingestion/chunker.py">ingestion/chunker.py</a></li><li><a href="../backend/src/rag/providers/parsers/pdf.py">providers/parsers/pdf.py</a></li><li><a href="../backend/src/rag/providers/ocr/rapidocr.py">providers/ocr/rapidocr.py</a></li></ul></div>
+        <div class="card"><h3>Storage and indexing</h3><ul><li><a href="../backend/src/rag/db/schema.py">db/schema.py</a></li><li><a href="../backend/src/rag/providers/storage/objects.py">providers/storage/objects.py</a></li><li><a href="../backend/src/rag/providers/vectorstore/qdrant.py">providers/vectorstore/qdrant.py</a></li><li><a href="../backend/src/rag/ingestion/index_builds.py">ingestion/index_builds.py</a></li></ul></div>
+        <div class="card"><h3>Retrieval and models</h3><ul><li><a href="../backend/src/rag/retrieval/query_router.py">retrieval/query_router.py</a></li><li><a href="../backend/src/rag/retrieval/retriever.py">retrieval/retriever.py</a></li><li><a href="../backend/src/rag/providers/embedders/local.py">providers/embedders/local.py</a></li><li><a href="../backend/src/rag/text/bm25.py">text/bm25.py</a></li><li><a href="../backend/src/rag/providers/rerankers/local.py">providers/rerankers/local.py</a></li></ul></div>
+        <div class="card"><h3>Answering and safety</h3><ul><li><a href="../backend/src/rag/answering/agent.py">answering/agent.py</a></li><li><a href="../backend/src/rag/answering/citations.py">answering/citations.py</a></li><li><a href="../backend/src/rag/answering/grounding.py">answering/grounding.py</a></li><li><a href="../backend/src/rag/security/guardrails.py">security/guardrails.py</a></li></ul></div>
+        <div class="card"><h3>Evaluation</h3><ul><li><a href="../backend/src/rag/evaluation/runner.py">evaluation/runner.py</a></li><li><a href="../backend/src/rag/evaluation/golden.py">evaluation/golden.py</a></li><li><a href="../tests/eval/test_golden_sets.py">tests/eval/test_golden_sets.py</a></li><li><a href="evaluation.md">evaluation.md</a></li></ul></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head"><div><h2>Current implementation notes</h2><p>These are useful when reading the flow against the current configuration.</p></div></div>
+      <div class="grid two">
+        <div class="card"><h3>What is mandatory?</h3><p>Connector/ upload, original storage, PostgreSQL metadata, parser output, chunking, dense/sparse representations, Qdrant build, filtered retrieval, evidence prompt, citation/groundedness post-check, and API response.</p></div>
+        <div class="card"><h3>What is optional?</h3><p>Cloud parsers, cloud OCR, vision OCR, LLM query routing, cross-encoder reranking, research tools, and stronger groundedness judges. Their availability depends on settings and provider/model registration.</p></div>
+        <div class="card"><h3>Important separation</h3><p>Parsing creates evidence; chunking creates retrieval units; embeddings make semantic search possible; Qdrant ranks candidates; PostgreSQL/ACL logic determines what may be used; the answer model writes prose.</p></div>
+        <div class="card"><h3>Current role configuration</h3><p>OpenRouter OCR is activated through <code>OCR=vision/default</code>, not <code>OCR=openrouter/...</code>. The current local <code>.env</code> still has <code>OCR=local/rapidocr</code> and <code>VISION=none</code>; changing the role affects new extraction jobs, and existing files need <code>rag reparse</code>.</p><p class="refs"><a href="../backend/src/rag/config/settings.py">config/settings.py</a> · <a href="../backend/src/rag/config/roles.py">config/roles.py</a> · <a href="../backend/src/rag/cli.py">cli.py (reparse)</a></p></div>
+        <div class="card"><h3>Recommended reading order</h3><p>Start with <a href="../backend/src/rag/ingestion/pipeline.py">pipeline.py</a>, then <a href="../backend/src/rag/ingestion/formats.py">formats.py</a>, <a href="../backend/src/rag/ingestion/chunker.py">chunker.py</a>, <a href="../backend/src/rag/retrieval/retriever.py">retriever.py</a>, and finally <a href="../backend/src/rag/answering/agent.py">agent.py</a>.</p></div>
+      </div>
+    </section>
+
+    <footer class="footer">Source-audited against executable connector, ingestion, parser/OCR, model hub, storage, indexing, retrieval, answering, and evaluation paths. Optional branches are labeled as such; links point to implementation files so the flow can be checked against source.</footer>
+  </main>
+</body>
+</html>

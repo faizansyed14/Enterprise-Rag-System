@@ -1,0 +1,247 @@
+# ALAIN / Enterprise RAG v2 - the PRODUCTION stack on one host. Sized for a large machine (32+ vCPU, 128+ GB RAM); every limit
+# below is a variable in .env (see "Production sizing" in .env.example). Local development adds docker-compose.dev.yml.
+#
+#   scripts/start.sh                     build and start everything (creates .env from .env.example on first run)
+#   scripts/stop.sh                      stop (data is kept in the named volumes)
+#   scripts/monitoring.sh start|stop     optional Prometheus + Grafana (profile "monitoring")
+#   docker compose --profile clamav up -d clamav    optional virus scanning of uploads (set CLAMAV_URL)
+#
+# Only nginx publishes a port (http://localhost:3000, WEB_PORT). Postgres, Qdrant, the model server, the API and the web
+# server stay on the internal network. Settings come from .env (see .env.example); the values under `environment:` only
+# wire the containers together and override the same names in .env.
+
+name: rag
+
+x-backend: &backend
+  image: ${BACKEND_IMAGE:-rag-backend:local}
+  build:
+    context: ./backend
+    args:
+      INSTALL_LIBREOFFICE: ${INSTALL_LIBREOFFICE:-false}
+  env_file: .env
+  environment: &backend-env
+    DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-rag}
+    QDRANT_URL: http://qdrant:6333
+    LOCAL_MODELS_URL: http://model-server:8080
+    OBJECT_STORE_URL: ${OBJECT_STORE_URL:-file:///data/originals}
+    CACHE_DIR: /data/cache
+    EVAL_DIR: /data/eval
+  volumes:
+    - data:/data
+  init: true
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    qdrant:
+      condition: service_started
+    model-server:
+      condition: service_started
+  networks: [internal]
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    command:
+      - postgres
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-400}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-8GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-24GB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-64MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-2GB}
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - wal_compression=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    shm_size: ${POSTGRES_SHM:-2g}
+    mem_limit: ${POSTGRES_MEM:-32g}
+    networks: [internal]
+    logging: *logging
+
+  qdrant:
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env (scripts/start.sh generates one)}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    restart: unless-stopped
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    mem_limit: ${QDRANT_MEM:-64g}
+    networks: [internal]
+    logging: *logging
+
+  model-server:
+    image: ${MODEL_SERVER_IMAGE:-rag-model-server:local}
+    build:
+      context: ./backend/model_server
+    environment:
+      LOCAL_MODELS: ${LOCAL_MODELS:-multilingual-e5-small,mmarco-mMiniLMv2-L12}
+      LOCAL_MODELS_TOKEN: ${LOCAL_MODELS_TOKEN:-}
+      MODEL_MAX_INPUTS: ${MODEL_MAX_INPUTS:-256}
+      OMP_NUM_THREADS: ${MODEL_THREADS:-8}
+    volumes:
+      - models:/models
+    init: true
+    restart: unless-stopped
+    mem_limit: ${MODEL_MEM:-12g}
+    networks: [internal]
+    logging: *logging
+
+  # Applies database migrations, then serves the API. The workers and the scheduler wait for it to be healthy.
+  backend:
+    <<: *backend
+    command: ["sh", "-c", "rag db upgrade && exec rag api --workers ${API_WORKERS:-4}"]
+    mem_limit: ${BACKEND_MEM:-8g}
+    environment:
+      <<: *backend-env
+      # nginx and the web server are the only things that reach the API, so their X-Forwarded-For is trusted.
+      FORWARDED_ALLOW_IPS: "*"
+      PROMETHEUS_METRICS: ${PROMETHEUS_METRICS:-true}
+
+  # Every background job: reading files, OCR, chunking, embedding, publishing, permission changes and deletions. Scale
+  # with WORKER_REPLICAS (copies) and WORKER_CONCURRENCY (parallel jobs per copy).
+  worker:
+    <<: *backend
+    command: ["rag", "worker"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-4}
+    mem_limit: ${WORKER_MEM:-8g}
+    depends_on:
+      backend:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      model-server:
+        condition: service_started
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *backend
+    command: ["rag", "scheduler"]
+    mem_limit: ${SCHEDULER_MEM:-1g}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-rag-frontend:local}
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_APP_NAME: ${APP_NAME:-RAG}
+        API_URL: http://backend:8000
+    init: true
+    restart: unless-stopped
+    mem_limit: ${FRONTEND_MEM:-2g}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [internal]
+    logging: *logging
+
+  # The one published port: http://localhost:3000. /api goes to the API, everything else to the web UI (deploy/nginx.conf).
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    mem_limit: ${NGINX_MEM:-256m}
+    init: true
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+  # ---- optional ---------------------------------------------------------------------------------------------------------
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.5.0}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+  grafana:
+    profiles: ["monitoring"]
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.1.0}
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+  clamav:
+    profiles: ["clamav"]
+    image: ${CLAMAV_IMAGE:-clamav/clamav:stable}
+    volumes:
+      - clamav_db:/var/lib/clamav
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+networks:
+  internal: {}
+
+volumes:
+  pgdata: {}
+  qdrant_data: {}
+  qdrant_snapshots: {}
+  models: {}
+  data: {}
+  prometheus_data: {}
+  grafana_data: {}
+  clamav_db: {}

@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+screenshots
+test-results
+*.log
+.env
+.env.*
+src/components/brand/marks.generated.ts

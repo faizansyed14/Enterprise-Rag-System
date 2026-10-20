@@ -1,0 +1,254 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Palette and type carried over from the previous product: ink on paper, Inter for the interface, Cormorant
+   Garamond for headings and for text quoted from documents. Dark is the default theme. */
+:root {
+  --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --surface: #f4f4f3;
+  --surface-raised: #ffffff;
+  --surface-hover: #ebebea;
+  --border: #e2e2e0;
+  --border-strong: #b8b8b4;
+  --muted: #6b6b68;
+  --accent: #0a0a0a;
+  --accent-fg: #ffffff;
+  --accent-soft: #ededec;
+  --success: #1c7a49;
+  --success-soft: #e2f3e9;
+  --danger: #b8392b;
+  --danger-soft: #fdecea;
+  --warning: #8f6200;
+  --warning-soft: #fff3d1;
+  --sidebar: #f7f7f6;
+  --sidebar-fg: #0a0a0a;
+  --sidebar-muted: #6b6b68;
+  --sidebar-hover: #ebebea;
+  --sidebar-active: #e2e2e0;
+  --sidebar-border: #e2e2e0;
+  --composer: #f4f4f3;
+  --bubble-user: #0a0a0a;
+  --bubble-user-fg: #ffffff;
+  --highlight: rgba(255, 196, 0, 0.32);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.03);
+  --shadow-md: 0 24px 70px rgba(0, 0, 0, 0.1), 0 3px 14px rgba(0, 0, 0, 0.06);
+  --radius: 10px;
+  --radius-lg: 14px;
+}
+
+html.dark {
+  --background: #090909;
+  --foreground: #f2f2ef;
+  --surface: #171717;
+  --surface-raised: #101010;
+  --surface-hover: #222222;
+  --border: #2d2d2b;
+  --border-strong: #444440;
+  --muted: #999995;
+  --accent: #f2f2ef;
+  --accent-fg: #080808;
+  --accent-soft: #222220;
+  --success: #8bc4a5;
+  --success-soft: #1b3024;
+  --danger: #e69890;
+  --danger-soft: #37211f;
+  --warning: #d9b978;
+  --warning-soft: #342b1c;
+  --sidebar: #000000;
+  --sidebar-fg: #eceee8;
+  --sidebar-muted: #90978e;
+  --sidebar-hover: #151515;
+  --sidebar-active: #232323;
+  --sidebar-border: #292929;
+  --composer: #121212;
+  --bubble-user: #f2f2ef;
+  --bubble-user-fg: #090909;
+  --highlight: rgba(255, 196, 0, 0.28);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 0 0 1px rgba(255, 255, 255, 0.025);
+  --shadow-md: 0 24px 70px rgba(0, 0, 0, 0.38), 0 3px 14px rgba(0, 0, 0, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+html {
+  background: var(--background);
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01";
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Text quoted from documents: the document's own voice, set apart from what the system says. */
+.source-text {
+  font-family: var(--font-display);
+  font-size: 1.06rem;
+  line-height: 1.5;
+}
+
+/* Cormorant sets old-style figures by default (C4o, 2o mm). Codes and quantities must read exactly, so the
+   display face always uses lining figures. */
+.source-text,
+.font-display {
+  font-variant-numeric: lining-nums;
+  font-feature-settings: "lnum" 1;
+}
+
+/* Revision stamp: the outlined mark a document controller puts on a sheet. */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  line-height: 1.2rem;
+  white-space: nowrap;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+@keyframes caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: caret 1s steps(1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot,
+  .caret::after {
+    animation: none;
+  }
+  * {
+    transition-duration: 0ms !important;
+  }
+}
+
+/* A cited source as a title block: stacked in a narrow column, one strip when there is room. */
+.tb {
+  container-type: inline-size;
+}
+
+.tb-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.tb-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.tb-cells {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+@container (min-width: 600px) {
+  .tb-main {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+  .tb-head {
+    border-bottom: 0;
+    border-right: 1px solid var(--border);
+  }
+}
+
+/* A page of a spreadsheet or document is drawn as white paper in both themes, so it uses the light palette: otherwise the dark
+   theme's near-white text lands on white cells and cannot be read. */
+.paper {
+  --foreground: #0a0a0a;
+  --muted: #6b6b68;
+  --surface: #f4f4f3;
+  --surface-hover: #ebebea;
+  --border: #e2e2e0;
+  --border-strong: #b8b8b4;
+  color: #0a0a0a;
+  color-scheme: light;
+}

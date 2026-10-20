@@ -1,0 +1,61 @@
+# secrets and local state
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+/data/
+/backups/
+/models/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+!deploy/**/*.crt
+
+# evaluation corpus (PDFs / Office docs mounted in docker-compose.dev.yml) — do not push
+evalcorpus/
+
+# local pip / scratch mounts (docker-compose.dev.yml → /devdeps)
+.devdeps/
+docs/images/
+# eval run outputs (keep golden_*.jsonl and *.py / *.sh under eval/)
+eval/*.json
+eval/**/last-run.json
+eval/**/rr_*.json
+
+# python
+**/__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# node / next
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/screenshots/
+frontend/src/components/brand/marks.generated.ts
+
+# editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+
+# development scratch that depends on the local evaluation corpus (not in the repository) or on a removed comparison stack
+eval/golden_*.jsonl
+eval/g3.jsonl
+eval/old_stack.py
+eval/rerank_sweep.sh
+eval/setup_mini.py

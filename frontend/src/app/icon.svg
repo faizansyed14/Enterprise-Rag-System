@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- A drawing sheet with its title block in the corner. -->
+  <rect width="32" height="32" rx="7" fill="#0a0a0a"/>
+  <rect x="7" y="7" width="18" height="18" rx="1.5" fill="none" stroke="#f2f2ef" stroke-width="1.7"/>
+  <path d="M15.5 19.5H25M15.5 19.5V25" fill="none" stroke="#f2f2ef" stroke-width="1.7"/>
+</svg>

@@ -1,0 +1,125 @@
+# LOCAL DEVELOPMENT. Used together with docker-compose.yml (which is the production stack):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# or set COMPOSE_FILE in .env (the default for this machine) and plain `docker compose up -d` does the same:
+#
+#   COMPOSE_PATH_SEPARATOR=:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml
+#
+# What this adds to production:
+#   * Postgres, Qdrant and the model server on localhost ports, for scripts/dev.sh (API and workers run from source)
+#   * the services run the code in ./backend/src (no image rebuild for a Python change; restart the container)
+#   * memory limits, so one process cannot take Docker Desktop's VM down
+#   * the evaluation corpus, tests and eval scripts mounted read-only
+#   * OpenRouter key only in the API (answers) and the parsing worker (vision and metadata filling, when switched on); every other
+#     paid key is blank everywhere
+#   * profile "test": throwaway Postgres and Qdrant on other ports for scripts/test.sh (data in memory)
+
+x-no-paid-keys: &no-paid-keys
+  OPENROUTER_API_KEY: ""
+  LLAMA_CLOUD_API_KEY: ""
+  OPENAI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  COHERE_API_KEY: ""
+  MISTRAL_API_KEY: ""
+  AZURE_OPENAI_API_KEY: ""
+  AZURE_DI_KEY: ""
+
+x-dev-env: &dev-env
+  <<: *no-paid-keys
+  PYTHONPATH: /devdeps
+
+x-dev-mounts: &dev-mounts
+  - ./.devdeps:/devdeps
+  - ./backend/src/rag:/app/.venv/lib/python3.12/site-packages/rag:ro
+  - ./evalcorpus:/sources/eval:ro
+
+services:
+  postgres:
+    mem_limit: 2000m
+    shm_size: 256m
+    command:   # small-machine settings (the production file assumes tens of GB)
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1
+    ports:
+      - "127.0.0.1:${DEV_POSTGRES_PORT:-5432}:5432"
+  qdrant:
+    mem_limit: 1500m
+    ports:
+      - "127.0.0.1:${DEV_QDRANT_PORT:-6333}:6333"
+  model-server:
+    mem_limit: 3500m
+    cpus: 5          # embedding and reranking are CPU-bound: capped so the API, database and UI keep their share
+    environment:
+      OMP_NUM_THREADS: "3"
+    ports:
+      - "127.0.0.1:${DEV_MODELS_PORT:-8080}:8080"
+    volumes:
+      - ./backend/model_server/src/rag_model_server:/app/.venv/lib/python3.12/site-packages/rag_model_server:ro
+
+  backend:
+    mem_limit: 2g
+    command: ["sh", "-c", "rag db upgrade && exec rag api --workers 2"]
+    environment:
+      <<: *dev-env
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}   # the one place a paid key is needed: answers
+    volumes:
+      - ./.devdeps:/devdeps
+      - ./backend/src/rag:/app/.venv/lib/python3.12/site-packages/rag:ro
+      - ./evalcorpus:/sources/eval:ro
+      - ./tests:/tests:ro
+      - ./eval:/eval:ro
+  worker:
+    mem_limit: 2200m
+    cpus: 2.5          # OCR and layout analysis would otherwise use every core in bursts and starve the API
+    deploy:
+      replicas: 2   # was three containers (parse 2 slots, embed 6, control 4); two copies of the one worker
+    environment:
+      <<: *dev-env
+      OMP_NUM_THREADS: "3"
+      ORT_NUM_THREADS: "3"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}   # used only if vision or metadata filling is switched on
+      WORKER_CONCURRENCY: "4"
+    volumes: *dev-mounts
+  scheduler:
+    environment: *dev-env
+    volumes: *dev-mounts
+
+  # --- scripts/test.sh: docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile test up -d --wait test-postgres test-qdrant
+  test-postgres:
+    profiles: [test]
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  test-qdrant:
+    profiles: [test]
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:56333:6333"
+    tmpfs:
+      - /qdrant/storage
