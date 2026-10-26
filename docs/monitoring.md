@@ -87,3 +87,18 @@ how.
 | Library not growing | Queues (waiting vs running), Processes (workers online), Failed jobs |
 | Newly shared file not found | Source status and last sync on Sources; `control_lane_stuck`; job queue on the interactive lane |
 | Cost climbing | Model calls by role; consider cheaper `LLM_ROUTER` / `LLM_ENRICH`, or lower `VISION_PAGES_PER_DAY` |
+| One answer looks wrong | The **Details** (info) button under the answer: the live trace of that answer (plan, every search with candidate scores, files read, each model call with its exact masked messages, citation checks). It is not stored, so open it while the page is still loaded. |
+| Qdrant `points/count` calls every few seconds in the logs | Before the 2026-10-23 scheduler fix, finished periodic jobs were queued again on every 5 s tick, so the daily `reconcile` ran continuously. After the fix, each periodic slot runs once. If the calls come back, check the `jobs` table for repeated `periodic:reconcile:*` keys. |
+
+## Periodic jobs
+
+Every 5 seconds the scheduler queues the jobs that are due, once per time slot (`jobs/scheduler.py`):
+
+| Job | Every | What it does |
+|---|---|---|
+| `janitor` | 30 s | Puts back jobs whose worker stopped renewing its lease |
+| `monitor_tick` | 30 s | Evaluates the alert rules |
+| `resume_stalled` | 2 min | Picks up items that were read but never enriched |
+| `maintenance` | 1 h | Partitions, retention, expired sessions, finished jobs, abandoned ZIP staging folders |
+| `gc_blobs` | 6 h | Removes stored files nothing uses (up to 500 per run) |
+| `reconcile` | 24 h | Compares Postgres with Qdrant per version and repairs differences (raises `reconcile_repairs`) |

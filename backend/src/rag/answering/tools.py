@@ -154,9 +154,20 @@ class ToolBox:
                 "ORDER BY chunk_no"), {"v": top.version_id})).all()
         if not rows or sum(len(r.text) + 40 for r in rows) > budget_chars:
             return False
-        self.passages[:] = [dataclasses.replace(top, n=i, chunk_id=f"whole:{top.version_id}:{r.chunk_no}", page_start=r.page_start,
-                                                page_end=r.page_end, section_path=r.section_path, kind=r.kind, text=r.text,
-                                                core_text=r.text) for i, r in enumerate(rows, 1)]
+        self.passages[:] = [
+            dataclasses.replace(
+                top,
+                n=i,
+                chunk_id=f"whole:{top.version_id}:{r.chunk_no}",
+                page_start=r.page_start,
+                page_end=r.page_end,
+                section_path=r.section_path,
+                kind=r.kind,
+                text=r.text,
+                core_text=r.text,
+            )
+            for i, r in enumerate(rows, 1)
+        ]
         self.max_passages = max(self.max_passages, len(rows))
         return True
 

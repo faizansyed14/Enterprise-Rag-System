@@ -2,12 +2,14 @@
 
 Everything that reaches a cloud chat or vision model is built in one place, so that is where the protection sits:
 
-  find(text)         the sensitive values in a text (IBANs, card numbers, labelled bank account numbers, SWIFT/BIC, sort and routing
-                     codes, national ids), checked where a check exists (IBAN mod 97, card Luhn) so ordinary numbers are left alone
-  Vault              swaps each value for a placeholder such as [[ACCOUNT_1]] before a request leaves, and swaps the real value back
-                     into the reply, so the answer a person reads still has the number while the model only ever saw the placeholder
-  ShieldedChat       wraps a chat model with that round trip: messages, tool-call arguments, and a streamed reply that may split a
-                     placeholder over several pieces
+  find(text)         the sensitive values in a text (IBANs, card numbers, labelled bank account numbers, SWIFT/BIC,
+                     sort and routing codes, national ids), checked where a check exists (IBAN mod 97, card Luhn)
+                     so ordinary numbers are left alone
+  Vault              swaps each value for a placeholder such as [[ACCOUNT_1]] before a request leaves, and swaps the
+                     real value back into the reply, so the answer a person reads still has the number while the
+                     model only ever saw the placeholder
+  ShieldedChat       wraps a chat model with that round trip: messages, tool-call arguments, and a streamed reply
+                     that may split a placeholder over several pieces
   redact(text)       permanent removal, for people who do not want the values in the index at all
 
 Images cannot be masked, so a page whose own text contains such a value is not sent as an image (see providers/ocr/vision.py).
@@ -28,12 +30,23 @@ from rag.plugins.capabilities import ChatMessage, ChatResult, StreamChunk, ToolC
 
 log = logging.getLogger(__name__)
 
-# Set by ShieldedChat while a call runs: None = no shield on this call, n = the shield was on and masked n values. The metering layer
-# stores it with the call (spans.attrs.masked_values), so `rag privacy calls` can show it. Only a count is kept, never a value.
+# Set by ShieldedChat while a call runs: None = no shield on this call, n = the shield was on and masked n values. The
+# metering layer stores it with the call (spans.attrs.masked_values), so `rag privacy calls` can show it. Only a count
+# is kept, never a value.
 MASKED_VALUES: ContextVar[int | None] = ContextVar("masked_values", default=None)
 
-BANK_KINDS = ("iban", "card", "account", "swift", "ssn", "emirates_id", "passport",
-              "payment_ref", "secret", "tax_id")  # money, identity and credentials: these keep a page or a whole document away
+BANK_KINDS = (
+    "iban",
+    "card",
+    "account",
+    "swift",
+    "ssn",
+    "emirates_id",
+    "passport",
+    "payment_ref",
+    "secret",
+    "tax_id",
+)  # money, identity and credentials: these keep a page or a whole document away
 ALL_KINDS = (*BANK_KINDS, "email", "phone", "long_number", "custom")  # ... whereas these are only masked in text
 
 
@@ -41,51 +54,81 @@ def bank_kinds(kinds: Sequence[str]) -> tuple[str, ...]:
     """The kinds among `kinds` that are worth keeping a whole page or document away from a cloud model."""
     return tuple(k for k in kinds if k in BANK_KINDS)
 
+
 # groups may be separated by spaces or a line break: an IBAN that wraps at the end of a line is still one IBAN
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?:\s{0,3}[A-Z0-9]{4}){2,7}(?:\s{0,3}[A-Z0-9]{1,3})?\b", re.IGNORECASE)
 _CARD = re.compile(r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])")
-_ACCOUNT_LABEL = (r"(?:(?:bank\s+|beneficiary\s+|savings\s+|current\s+|salary\s+)?(?:account|acct|a/c)"
-                  r"(?:\s*(?:no\.?|number|num\.?|nbr|#|id))?|sort\s*code|routing(?:\s*(?:no\.?|number|#))?|aba(?:\s*(?:no\.?|number))?|ifsc"
-                  r"|clabe|bsb|iban"
-                  # Arabic: "رقم الحساب" (account number), "حساب رقم", "رقم الحساب المصرفي", "الآيبان" (IBAN)
-                  r"|(?:رقم\s+)?(?:الحساب|حساب)(?:\s+(?:المصرفي|البنكي))?(?:\s+رقم)?|(?:رقم\s+)?(?:الآيبان|الايبان|آيبان|ايبان))")
-# up to three short words between the label and its value: "Account Number AED: ...", "Account No. (USD) - ...", "A/C Number Current: ..."
+_ACCOUNT_LABEL = (
+    r"(?:(?:bank\s+|beneficiary\s+|savings\s+|current\s+|salary\s+)?(?:account|acct|a/c)"
+    r"(?:\s*(?:no\.?|number|num\.?|nbr|#|id))?|sort\s*code|routing(?:\s*(?:no\.?|number|#))?|aba(?:\s*(?:no\.?|number))?|ifsc"
+    r"|clabe|bsb|iban"
+    # Arabic: "رقم الحساب" (account number), "حساب رقم", "رقم الحساب المصرفي", "الآيبان" (IBAN)
+    r"|(?:رقم\s+)?(?:الحساب|حساب)(?:\s+(?:المصرفي|البنكي))?(?:\s+رقم)?|(?:رقم\s+)?(?:الآيبان|الايبان|آيبان|ايبان))"
+)
+# up to three short words between the label and its value: "Account Number AED: ...", "Account No. (USD) -
+# ...", "A/C Number Current: ..."
 _CURRENCIES = "AED|USD|EUR|GBP|SAR|QAR|KWD|BHD|OMR|INR|PKR|EGP|JOD|LBP|CHF|JPY|CNY|CAD|AUD|SGD|HKD|NZD|ZAR|TRY"
-_QUALIFIERS = (rf"(?:[ \t]+[(\[]?(?:(?:{_CURRENCIES})(?:[/,&](?:{_CURRENCIES}))*|current|savings?|salary|main|primary|new|old|local|foreign|"
-               r"corporate|business|personal)[)\]]?){0,2}")
-_ACCOUNT = re.compile(rf"\b{_ACCOUNT_LABEL}\b\.?{_QUALIFIERS}[ \t]*[:=\-–|#.]*\s*((?:[A-Z]{{1,4}}[ -]?)?\d[\d ./-]{{4,30}}\d)", re.IGNORECASE)
-_SWIFT = re.compile(r"\b(?:swift|bic)(?:\s*(?:code|/\s*bic))?\b[\s:=\-–|#.]*([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b", re.IGNORECASE)
+_QUALIFIERS = (
+    rf"(?:[ \t]+[(\[]?(?:(?:{_CURRENCIES})(?:[/,&](?:{_CURRENCIES}))*|current|savings?|salary|main|primary|new|old|local|foreign|"
+    r"corporate|business|personal)[)\]]?){0,2}"
+)
+_ACCOUNT = re.compile(
+    rf"\b{_ACCOUNT_LABEL}\b\.?{_QUALIFIERS}[ \t]*[:=\-–|#.]*\s*((?:[A-Z]{{1,4}}[ -]?)?\d[\d ./-]{{4,30}}\d)", re.IGNORECASE
+)
+_SWIFT = re.compile(
+    r"\b(?:swift|bic)(?:\s*(?:code|/\s*bic))?\b[\s:=\-–|#.]*([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b", re.IGNORECASE
+)
 _SSN = re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")
 _EMIRATES_ID = re.compile(r"\b784[- ]?\d{4}[- ]?\d{7}[- ]?\d\b")
-_EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9][A-Z0-9._%+-]*@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)*\.[A-Z]{2,}(?![\w-])", re.IGNORECASE)
+_EMAIL = re.compile(
+    r"(?<![\w.+-])[A-Z0-9][A-Z0-9._%+-]*@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)*\.[A-Z]{2,}(?![\w-])",
+    re.IGNORECASE,
+)
 _PHONE_LABEL = r"(?:tel(?:ephone)?|phone|mobile|mob|cell|whatsapp|fax|ph|contact(?:\s*(?:no\.?|number))?)"
-# international form (+971 50 123 4567), a labelled number, or the UAE shapes: mobile 05x xxx xxxx and landline 0x xxx xxxx with separators
+# international form (+971 50 123 4567), a labelled number, or the UAE shapes: mobile 05x xxx xxxx and landline
+# 0x xxx xxxx with separators
 _PHONE_INTL = re.compile(r"(?<![\w+])\+\d{1,3}(?:[ .()-]*\d){7,13}(?!\d)")
-_PHONE_LABELLED = re.compile(rf"\b{_PHONE_LABEL}\b[ \t]*(?:no\.?|number|#)?[ \t]*[:=\-–|#.]*[ \t]*(\+?\d[\d ().-]{{5,18}}\d)", re.IGNORECASE)
+_PHONE_LABELLED = re.compile(
+    rf"\b{_PHONE_LABEL}\b[ \t]*(?:no\.?|number|#)?[ \t]*[:=\-–|#.]*[ \t]*(\+?\d[\d ().-]{{5,18}}\d)", re.IGNORECASE
+)
 _PHONE_UAE = re.compile(r"(?<![\w.+-])(?:05\d[ -]?\d{3}[ -]?\d{4}|0[2-9][ -]\d{3}[ -]?\d{4})(?![\w-])")
 _PASSPORT = re.compile(r"\bpassport(?:\s*(?:no\.?|number|#))?\b[\s:=\-–|#.]*([A-Z0-9]{6,9})\b", re.IGNORECASE)
 
-# Payment-processor ids (Stripe: pi_..., ch_..., cus_..., pm_..., evt_...) and keys (sk_live_..., whsec_...). The id part must hold a
-# digit, so ordinary words such as "in_progress" are left alone.
-_STRIPE = re.compile(r"\b(?:(?:pi|ch|cus|pm|src|tok|re|evt|in|sub|py|po|txn|card|acct|price|seti|si|cs|plink|ii|il|rcpt|ba|fee|dp|prod)_"
-                     r"(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,}|(?:sk|pk|rk|whsec)_(?:live_|test_)?[A-Za-z0-9]{10,})\b")
+# Payment-processor ids (Stripe: pi_..., ch_..., cus_..., pm_..., evt_...) and keys (sk_live_..., whsec_...). The id part must
+# hold a digit, so ordinary words such as "in_progress" are left alone.
+_STRIPE = re.compile(
+    r"\b(?:(?:pi|ch|cus|pm|src|tok|re|evt|in|sub|py|po|txn|card|acct|price|seti|si|cs|plink|ii|il|rcpt|ba|fee|dp|prod)_"
+    r"(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,}|(?:sk|pk|rk|whsec)_(?:live_|test_)?[A-Za-z0-9]{10,})\b"
+)
 # "Payment Reference: rxJduo1XlU57cgw3RuHDrWTz0", "Payment References: a + b + c", "Transaction ID: ...", "Auth code: ..."
-_PAYMENT_LABEL = (r"(?:payment\s+(?:id|ids|ref(?:erence)?s?|intent|token)|transaction\s+(?:id|ref(?:erence)?|number|no\.?)|txn\s*(?:id|ref)?"
-                  r"|charge\s+id|receipt\s+(?:no\.?|number)|auth(?:ori[sz]ation)?\s+code|approval\s+code|customer\s+id|subscription\s+id"
-                  r"|invoice\s+ref(?:erence)?|payment\s+ref|رقم\s+العملية|رقم\s+المعاملة|مرجع\s+الدفع)")
-_PAYMENT_REF = re.compile(rf"\b{_PAYMENT_LABEL}[ \t]*[:=\-–|#]*[ \t]*((?:[A-Za-z0-9_-]{{6,}})(?:[ \t]*[+,;/][ \t]*[A-Za-z0-9_-]{{6,}})*)", re.IGNORECASE)
+_PAYMENT_LABEL = (
+    r"(?:payment\s+(?:id|ids|ref(?:erence)?s?|intent|token)|transaction\s+(?:id|ref(?:erence)?|number|no\.?)|txn\s*(?:id|ref)?"
+    r"|charge\s+id|receipt\s+(?:no\.?|number)|auth(?:ori[sz]ation)?\s+code|approval\s+code|customer\s+id|subscription\s+id"
+    r"|invoice\s+ref(?:erence)?|payment\s+ref|رقم\s+العملية|رقم\s+المعاملة|مرجع\s+الدفع)"
+)
+_PAYMENT_REF = re.compile(
+    rf"\b{_PAYMENT_LABEL}[ \t]*[:=\-–|#]*[ \t]*((?:[A-Za-z0-9_-]{{6,}})(?:[ \t]*[+,;/][ \t]*[A-Za-z0-9_-]{{6,}})*)", re.IGNORECASE
+)
 _TOKEN_PART = re.compile(r"[A-Za-z0-9_-]{6,}")
 # credentials: a labelled password / key / token, and well-known secret shapes
-_SECRET_LABELLED = re.compile(r"\b(?:password|passwd|pwd|passcode|pin(?:\s*code)?|api[ _-]?key|secret(?:[ _-]?key)?|access[ _-]?(?:key|token)|"
-                              r"auth[ _-]?token|private[ _-]?key|client[ _-]?secret|كلمة\s+(?:المرور|السر))\b[ \t]*[:=][ \t]*(\S{4,})", re.IGNORECASE)
-_SECRET_SHAPES = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}|ghp_[A-Za-z0-9]{30,}|xox[abp]-[A-Za-z0-9-]{10,})\b"
-                            r"|Bearer[ \t]+[A-Za-z0-9._~+/-]{20,}=*")
+_SECRET_LABELLED = re.compile(
+    r"\b(?:password|passwd|pwd|passcode|pin(?:\s*code)?|api[ _-]?key|secret(?:[ _-]?key)?|access[ _-]?(?:key|token)|"
+    r"auth[ _-]?token|private[ _-]?key|client[ _-]?secret|كلمة\s+(?:المرور|السر))\b[ \t]*[:=][ \t]*(\S{4,})",
+    re.IGNORECASE,
+)
+_SECRET_SHAPES = re.compile(
+    r"\b(?:AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}|ghp_[A-Za-z0-9]{30,}|xox[abp]-[A-Za-z0-9-]{10,})\b"
+    r"|Bearer[ \t]+[A-Za-z0-9._~+/-]{20,}=*"
+)
 # tax, trade-licence and registration numbers (UAE TRN is 15 digits)
-_TAX_LABEL = (r"(?:trn|tin|tax\s+registration\s+(?:no\.?|number)|tax\s+(?:id|number)|vat\s+(?:reg(?:istration)?\s+)?(?:no\.?|number)"
-              r"|(?:trade\s+|commercial\s+)?licen[cs]e\s+(?:no\.?|number)|commercial\s+registration(?:\s+(?:no\.?|number))?|cr\s*(?:no\.?|number)"
-              r"|الرقم\s+الضريبي|رقم\s+الرخصة|رقم\s+التسجيل\s+الضريبي|السجل\s+التجاري)")
+_TAX_LABEL = (
+    r"(?:trn|tin|tax\s+registration\s+(?:no\.?|number)|tax\s+(?:id|number)|vat\s+(?:reg(?:istration)?\s+)?(?:no\.?|number)"
+    r"|(?:trade\s+|commercial\s+)?licen[cs]e\s+(?:no\.?|number)|commercial\s+registration(?:\s+(?:no\.?|number))?|cr\s*(?:no\.?|number)"
+    r"|الرقم\s+الضريبي|رقم\s+الرخصة|رقم\s+التسجيل\s+الضريبي|السجل\s+التجاري)"
+)
 _TAX_ID = re.compile(rf"\b{_TAX_LABEL}[ \t]*[:=\-–|#.]*[ \t]*([A-Z0-9](?:[A-Z0-9/-]| (?=\d)){{5,22}}[A-Z0-9])", re.IGNORECASE)
-# any run of 10 or more digits (an account, card, phone or id that nothing labels); not part of a decimal, a grouped amount or a word
+# any run of 10 or more digits (an account, card, phone or id that nothing labels); not part of a decimal, a
+# grouped amount or a word
 _LONG_NUMBER = re.compile(r"(?<![\w.,-])\d{10,}(?![\w-]|[.,]\d)")
 
 
@@ -101,8 +144,12 @@ def _custom_rules() -> tuple[tuple[re.Pattern[str], ...], tuple[re.Pattern[str],
 @functools.lru_cache(maxsize=8)
 def _compile_custom(labels: str, patterns: str) -> tuple[tuple[re.Pattern[str], ...], tuple[re.Pattern[str], ...]]:
     label_rules = tuple(
-        re.compile(rf"\b{re.escape(label.strip())}\b[ \t]*[:=\-–|#]*[ \t]*([^|\n;]{{3,80}}?)(?=[ \t]*(?:\||;|\n|$))", re.IGNORECASE)
-        for label in labels.split(",") if label.strip())
+        re.compile(
+            rf"\b{re.escape(label.strip())}\b[ \t]*[:=\-–|#]*[ \t]*([^|\n;]{{3,80}}?)(?=[ \t]*(?:\||;|\n|$))", re.IGNORECASE
+        )
+        for label in labels.split(",")
+        if label.strip()
+    )
     pattern_rules = []
     for raw in patterns.split(";;"):
         if raw.strip():
@@ -162,15 +209,22 @@ def find(text: str, kinds: Sequence[str] = ALL_KINDS) -> list[Finding]:
     if "emirates_id" in wanted:
         found += [Finding("emirates_id", m.start(), m.end()) for m in _EMIRATES_ID.finditer(text)]
     if "passport" in wanted:
-        found += [Finding("passport", m.start(1), m.end(1)) for m in _PASSPORT.finditer(text)
-                  if any(ch.isdigit() for ch in m.group(1))]
+        found += [
+            Finding("passport", m.start(1), m.end(1)) for m in _PASSPORT.finditer(text) if any(ch.isdigit() for ch in m.group(1))
+        ]
     if "email" in wanted:
         found += [Finding("email", m.start(), m.end()) for m in _EMAIL.finditer(text)]
     if "phone" in wanted:
-        found += [Finding("phone", m.start(), m.end()) for m in _PHONE_INTL.finditer(text)
-                  if 9 <= sum(ch.isdigit() for ch in m.group(0)) <= 15]
-        found += [Finding("phone", m.start(1), m.end(1)) for m in _PHONE_LABELLED.finditer(text)
-                  if 7 <= sum(ch.isdigit() for ch in m.group(1)) <= 15]
+        found += [
+            Finding("phone", m.start(), m.end())
+            for m in _PHONE_INTL.finditer(text)
+            if 9 <= sum(ch.isdigit() for ch in m.group(0)) <= 15
+        ]
+        found += [
+            Finding("phone", m.start(1), m.end(1))
+            for m in _PHONE_LABELLED.finditer(text)
+            if 7 <= sum(ch.isdigit() for ch in m.group(1)) <= 15
+        ]
         found += [Finding("phone", m.start(), m.end()) for m in _PHONE_UAE.finditer(text)]
     if "payment_ref" in wanted:
         found += [Finding("payment_ref", m.start(), m.end()) for m in _STRIPE.finditer(text)]
@@ -208,7 +262,7 @@ def redact(text: str, kinds: Sequence[str] = ALL_KINDS) -> str:
     """Permanently replace each value with `[redacted kind]` (for stored text)."""
     out, last = [], 0
     for f in find(text, kinds):
-        out.append(text[last:f.start])
+        out.append(text[last : f.start])
         out.append(f"[redacted {f.kind.replace('_', ' ')}]")
         last = f.end
     out.append(text[last:])
@@ -234,7 +288,7 @@ class Vault:
     def learn(self, text: str) -> None:
         """Register the sensitive values of `text` without changing it."""
         for f in find(text, self.kinds):
-            self._token(text[f.start:f.end], f.kind)
+            self._token(text[f.start : f.end], f.kind)
 
     def _token(self, value: str, kind: str) -> str:
         token = self._by_value.get(value)
@@ -247,8 +301,8 @@ class Vault:
     def mask(self, text: str) -> str:
         out, last = [], 0
         for f in find(text, self.kinds):
-            out.append(text[last:f.start])
-            out.append(self._token(text[f.start:f.end], f.kind))
+            out.append(text[last : f.start])
+            out.append(self._token(text[f.start : f.end], f.kind))
             last = f.end
         out.append(text[last:])
         masked = "".join(out)
@@ -287,8 +341,10 @@ class Vault:
             if isinstance(content, str):
                 content = self.mask(content)
             else:
-                content = [dict(p, text=self.mask(p["text"])) if p.get("type") == "text" and isinstance(p.get("text"), str) else p
-                           for p in content]
+                content = [
+                    dict(p, text=self.mask(p["text"])) if p.get("type") == "text" and isinstance(p.get("text"), str) else p
+                    for p in content
+                ]
             calls = [ToolCall(c.id, c.name, self._walk(c.arguments, self.mask)) for c in message.tool_calls]
             out.append(replace(message, content=content, tool_calls=calls))
         return out
@@ -354,10 +410,11 @@ class ShieldedChat:
                     yield chunk
                     continue
                 pending += chunk.delta
-                # hold back what could be the start of a placeholder ("[", "[[", "[[ACCOUNT_1", "[[ACCOUNT_1]") until it is complete
+                # hold back what could be the start of a placeholder ("[", "[[", "[[ACCOUNT_1",
+                # "[[ACCOUNT_1]") until it is complete
                 tail = _PLACEHOLDER_START.search(pending)
                 if tail is not None:
-                    emit, pending = pending[:tail.start()], pending[tail.start():]
+                    emit, pending = pending[: tail.start()], pending[tail.start() :]
                 else:
                     emit, pending = pending, ""
                 if emit:

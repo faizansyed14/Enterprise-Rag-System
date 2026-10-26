@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import text
 
+from rag.cache import get_cache
 from rag.db.engine import transaction
 
 
@@ -26,6 +27,11 @@ async def check(key: str, limit: int, window_s: int) -> None:
     if limit <= 0:
         return
     now, start = _window(window_s)
+    seen = await get_cache().peek_window(key[:200], window_s)
+    if seen is not None:
+        if seen >= limit:
+            raise RateLimitExceeded(int(window_s - (now - start).total_seconds()) + 1)
+        return
     async with transaction() as conn:
         count = (await conn.execute(text("SELECT count FROM rate_limits WHERE key = :k AND window_start = :w"),
                                     {"k": key[:200], "w": start})).scalar()
@@ -38,6 +44,11 @@ async def hit(key: str, limit: int, window_s: int) -> int:
     if limit <= 0:
         return 0
     now, start = _window(window_s)
+    counted = await get_cache().incr_window(key[:200], window_s)  # one Redis round trip instead of a Postgres write per request
+    if counted is not None:
+        if counted > limit:
+            raise RateLimitExceeded(int(window_s - (now - start).total_seconds()) + 1)
+        return counted
     async with transaction() as conn:
         count = (await conn.execute(text(
             "INSERT INTO rate_limits (key, window_start, count) VALUES (:k, :w, 1) "

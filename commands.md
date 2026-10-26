@@ -145,7 +145,9 @@ scripts/restart.sh backend
 | Download the models in `LOCAL_MODELS` | `scripts/models.sh pull` |
 | Download others | `scripts/models.sh pull bge-m3 bge-reranker-v2-m3` |
 | Test one role with a real call (role name as in `.env`) | `docker compose exec backend rag models test LLM_ANSWER` |
-| Check configuration, models, database, Qdrant, object store, index | `docker compose exec backend rag check` |
+| Check configuration, models, database, Qdrant, object store, index (and Redis) | `docker compose exec backend rag check` |
+| Cache hit rates, entries and memory | `docker compose exec backend rag cache stats` |
+| Make every cached answer out of date (after a manual database change, say) | `docker compose exec backend rag cache clear` |
 | Which model each role uses | `docker compose exec backend rag models list` |
 
 Switching a model: edit its line in `.env` and run `scripts/restart.sh`. Answer models can also be switched live on the

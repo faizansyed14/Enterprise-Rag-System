@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +18,7 @@ from rag.api.deps import PrincipalsDep, ServicesDep, UserDep
 from rag.api.sse import sse_response
 from rag.db import schema
 from rag.db.engine import transaction
+from rag.monitoring import inspector
 from rag.monitoring.recorder import get_recorder
 from rag.monitoring.tracing import trace
 from rag.plugins.hub import LOCAL_ANSWERER
@@ -83,36 +86,61 @@ async def chat(body: ChatBody, user: UserDep, principals: PrincipalsDep, service
     conversation_id, history = await _conversation(user.id, body.conversation_id, body.question, body.filters)
     filters = SearchFilters.from_dict(body.filters)
 
+    details = s.chat_details == "all" or (s.chat_details == "admin" and user.is_admin)
+
     async def events() -> AsyncIterator[dict[str, Any]]:
+        # The answer runs in its own task and every event (and every step of the Details panel, which can happen at any
+        # moment inside a step, such as a model call starting) goes through one queue, so the browser sees it at once.
         outcome = AnswerOutcome()
         recorder = get_recorder()
         yield {"event": "conversation", "data": {"conversation_id": str(conversation_id)}}
-        message_id = None
-        trace_id = None
+        state: dict[str, Any] = {"message_id": None, "trace_id": None}
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+        async def answer() -> None:
+            inspector.activate(inspector.Inspector(lambda item: queue.put_nowait(("trace", item))) if details else None)
+            try:
+                with recorder.live.active("chat"):
+                    async with trace("chat", "answer", user_id=str(user.id), conversation=str(conversation_id)) as t:
+                        state["trace_id"] = t.id
+                        async for event in Answerer(services).answer(
+                                body.question, principals=principals, filters=filters, history=history,
+                                model_choice=body.model, outcome=outcome):
+                            if event["event"] == "done":
+                                async with transaction() as conn:
+                                    state["message_id"] = (await conn.execute(schema.messages.insert().values(
+                                        conversation_id=conversation_id, role="assistant", content=outcome.answer,
+                                        citations=outcome.citations, filters=outcome.filters, model=outcome.model,
+                                        trace_id=t.id, status=outcome.status, groundedness=outcome.groundedness,
+                                    ).returning(M.id))).scalar_one()
+                                event["data"]["message_id"] = str(state["message_id"])
+                                event["data"]["conversation_id"] = str(conversation_id)
+                                t.attrs.update({"status": outcome.status, "model": outcome.model})
+                            queue.put_nowait(("event", event))
+            except Exception as exc:  # noqa: BLE001 - handed to the stream below, which raises it as before
+                queue.put_nowait(("failed", exc))
+            finally:
+                queue.put_nowait(("end", None))
+
+        task = asyncio.create_task(answer())
         try:
-            with recorder.live.active("chat"):
-                async with trace("chat", "answer", user_id=str(user.id), conversation=str(conversation_id)) as t:
-                    trace_id = t.id
-                    async for event in Answerer(services).answer(
-                            body.question, principals=principals, filters=filters, history=history,
-                            model_choice=body.model, outcome=outcome):
-                        if event["event"] == "done":
-                            async with transaction() as conn:
-                                message_id = (await conn.execute(schema.messages.insert().values(
-                                    conversation_id=conversation_id, role="assistant", content=outcome.answer,
-                                    citations=outcome.citations, filters=outcome.filters, model=outcome.model,
-                                    trace_id=trace_id, status=outcome.status, groundedness=outcome.groundedness,
-                                ).returning(M.id))).scalar_one()
-                            event["data"]["message_id"] = str(message_id)
-                            event["data"]["conversation_id"] = str(conversation_id)
-                            t.attrs.update({"status": outcome.status, "model": outcome.model})
-                        yield event
+            while True:
+                kind, item = await queue.get()
+                if kind == "end":
+                    break
+                if kind == "failed":
+                    raise item
+                yield {"event": "trace", "data": item} if kind == "trace" else item
         finally:
-            if message_id is None and outcome.status in {"error", "refused"}:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            if state["message_id"] is None and outcome.status in {"error", "refused"}:
                 async with transaction() as conn:
                     await conn.execute(schema.messages.insert().values(
                         conversation_id=conversation_id, role="assistant", content=outcome.answer or "",
-                        status=outcome.status, model=outcome.model, trace_id=trace_id))
+                        status=outcome.status, model=outcome.model, trace_id=state["trace_id"]))
 
     return sse_response(events())
 

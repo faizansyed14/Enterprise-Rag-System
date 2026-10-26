@@ -146,3 +146,16 @@ def corpus_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("corpus")
     build_demo_corpus(root)
     return root
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_cache():
+    """Tests never read or fill a real Redis (a developer's environment may have REDIS_URL set)."""
+    from rag.cache import Cache, set_cache
+
+    set_cache(Cache(""))
+    yield
+    set_cache(None)

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from rag.config.roles import Capability, RoleSpec
+from rag.monitoring import inspector
 from rag.monitoring.tracing import span
 from rag.plugins.capabilities import ChatMessage, ChatResult, StreamChunk, ToolSpec
 from rag.privacy.shield import MASKED_VALUES
@@ -43,12 +44,22 @@ class _Metered:
 
 
 class MeteredChat(_Metered):
+    # The privacy shield wraps this layer, so `messages` here are exactly what leaves the server (masked): that is what the
+    # chat's Details panel shows (monitoring/inspector.py).
     async def complete(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] | None = None,
                        **kwargs: Any) -> ChatResult:
         async with self._span("chat.complete", tools=len(tools or [])) as record:
             self._label(record)
             record.attrs["masked_values"] = MASKED_VALUES.get()  # None: no privacy shield on this call
-            result: ChatResult = await self._inner.complete(messages, tools=tools, **kwargs)
+            shown = inspector.call_started(self._spec, messages, kwargs, streamed=False, tools=tools,
+                                           masked=MASKED_VALUES.get())
+            try:
+                result: ChatResult = await self._inner.complete(messages, tools=tools, **kwargs)
+            except BaseException as exc:
+                inspector.call_finished(shown, error=exc)
+                raise
+            inspector.call_finished(shown, content=result.content, tool_calls=result.tool_calls, usage=result.usage,
+                                    finish_reason=result.finish_reason)
             record.tokens_in = result.usage.input_tokens
             record.tokens_out = result.usage.output_tokens
             record.cost_usd = result.usage.cost_usd
@@ -60,18 +71,30 @@ class MeteredChat(_Metered):
         async with self._span("chat.stream") as record:
             self._label(record)
             record.attrs["masked_values"] = MASKED_VALUES.get()
+            shown = inspector.call_started(self._spec, messages, kwargs, streamed=True, masked=MASKED_VALUES.get())
             start = time.perf_counter()
             first = True
-            async for chunk in self._inner.stream(messages, **kwargs):
-                if first and chunk.delta:
-                    record.attrs["ttft_ms"] = round((time.perf_counter() - start) * 1000, 1)
-                    first = False
-                if chunk.result is not None:
-                    record.tokens_in = chunk.result.usage.input_tokens
-                    record.tokens_out = chunk.result.usage.output_tokens
-                    record.cost_usd = chunk.result.usage.cost_usd
-                    record.attrs["finish_reason"] = chunk.result.finish_reason
-                yield chunk
+            written: list[str] = []
+            try:
+                async for chunk in self._inner.stream(messages, **kwargs):
+                    if first and chunk.delta:
+                        record.attrs["ttft_ms"] = round((time.perf_counter() - start) * 1000, 1)
+                        first = False
+                    if chunk.delta:
+                        written.append(chunk.delta)
+                    if chunk.result is not None:
+                        record.tokens_in = chunk.result.usage.input_tokens
+                        record.tokens_out = chunk.result.usage.output_tokens
+                        record.cost_usd = chunk.result.usage.cost_usd
+                        record.attrs["finish_reason"] = chunk.result.finish_reason
+                        inspector.call_finished(shown, content="".join(written) or chunk.result.content,
+                                                usage=chunk.result.usage, finish_reason=chunk.result.finish_reason)
+                        shown = None
+                    yield chunk
+            except BaseException as exc:
+                inspector.call_finished(shown, content="".join(written), error=exc)
+                raise
+            inspector.call_finished(shown, content="".join(written))  # a stream that ended without a final result
 
 
 class MeteredEmbedder(_Metered):
@@ -84,7 +107,11 @@ class MeteredEmbedder(_Metered):
     async def embed_query(self, text: str) -> list[float]:
         async with self._span("embed.query") as record:
             self._label(record)
-            return await self._inner.embed_query(text)
+            start = time.perf_counter()
+            inspector.EMBED_SOURCE.set("")  # the embedder says where the vector came from, if it keeps a cache
+            vector = await self._inner.embed_query(text)
+            inspector.embedded(self._spec, text, vector, (time.perf_counter() - start) * 1000)
+            return vector
 
 
 class MeteredReranker(_Metered):

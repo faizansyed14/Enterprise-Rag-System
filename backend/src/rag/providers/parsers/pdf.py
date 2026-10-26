@@ -12,25 +12,27 @@ in memory.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import json
 import logging
 import math
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from rag.config.roles import Capability, RoleSpec
 from rag.config.settings import Settings
-from rag.errors import PermanentError
+from rag.errors import PermanentError, RateLimited
 from rag.metadata.title_block import parse_title_block
 from rag.plugins.capabilities import ChatMessage, OCRResult, ParsedDocument, ParsedPage, ParsedTable, TextLine
 from rag.plugins.registry import registry
+from rag.privacy.shield import has_sensitive
 from rag.providers.parsers import layout_runner, structure, table_flow, table_quality
 from rag.providers.parsers.pdfium_thread import run_pdfium
-from rag.privacy.shield import has_sensitive
 from rag.text import ligatures
 from rag.text.language import detect_language
 from rag.text.normalize import clean_text
@@ -38,6 +40,7 @@ from rag.text.normalize import clean_text
 log = logging.getLogger(__name__)
 
 DRAWING_MIN_SIDE_PT = 1190.0  # A3 long side is 1191 pt
+DRAWING_MIN_PATHS = 3000      # a CAD plot printed small on a Letter or A4 page still holds thousands of vector strokes
 MAX_RENDER_PIXELS = 12_000_000
 OcrCacheGet = Callable[[str, str], Awaitable[OCRResult | None]]
 OcrCachePut = Callable[[str, str, OCRResult], Awaitable[None]]
@@ -60,10 +63,41 @@ class PagePlan:
     image_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)  # (x0, y0, x1, y1) as page fractions
     label: str | None = None  # printed page number found in the running header/footer
     typo_text: str | None = None  # the text with headings marked from type sizes (fallback for the layout engine)
+    rotation: int = 0
 
     @property
     def method(self) -> str:
         return "text_layer"
+
+
+def _text_rotation(textpage: Any) -> int:
+    """The turn of the page's text, from the angle pdfium reports for a sample of its characters (a landscape drawing on a
+    portrait page has its text at 90 or 270 degrees)."""
+    try:
+        import pypdfium2.raw as pdfium_c
+
+        total = textpage.count_chars()
+        votes: dict[int, int] = {}
+        for index in range(0, total, max(1, total // 200)):
+            angle = pdfium_c.FPDFText_GetCharAngle(textpage.raw, index)
+            if angle >= 0:
+                key = round(math.degrees(angle) / 90) % 4 * 90
+                votes[key] = votes.get(key, 0) + 1
+        return max(votes, key=votes.get) if votes else 0
+    except Exception:  # noqa: BLE001 - an older pdfium without this call: assume upright
+        return 0
+
+
+_LABEL_WORDS = re.compile(
+    r"(?i)\b(date|revision|rev|scale|drawn|checked|approved|dwg\.?|drawing|title|cont\.?dwg\.?ref|ref|no\.?|"
+    r"project|client|contractor|location|by|sheet|number)\b|[^A-Za-z0-9]+"
+)
+
+
+def _is_label_text(value: str) -> bool:
+    """True when a title-block 'value' is only other labels ('DATE REVISION', 'CONT.DWG.REF NO'): the label's real value sits
+    elsewhere on the sheet, and keeping this would hide the value the vision model reads."""
+    return len(_LABEL_WORDS.sub("", value)) < 2
 
 
 def _garbage_ratio(text: str) -> float:
@@ -175,8 +209,11 @@ def _tables_for_page(plumber_pdf: Any, index: int) -> tuple[list[ParsedTable], s
         if not table_quality.is_usable(rows):
             continue  # shredded by merged cells: the page text reads better than rows labelled with the wrong columns
         x0, top, x1, bottom = table.bbox
-        tables.append(ParsedTable(rows=rows, header_rows=1,
-                                  bbox=(x0 / page.width, top / page.height, x1 / page.width, bottom / page.height)))
+        tables.append(
+            ParsedTable(
+                rows=rows, header_rows=1, bbox=(x0 / page.width, top / page.height, x1 / page.width, bottom / page.height)
+            )
+        )
         tops.append(top)
         try:
             outside = outside.outside_bbox(table.bbox)
@@ -217,12 +254,21 @@ def analyse_pdf(data: bytes, settings: Settings) -> tuple[list[PagePlan], dict[s
                     styled.append([])
                 ostats = _object_stats(page, width, height)
                 coverage, paths = ostats.image_coverage, ostats.paths
-                is_drawing = max(width, height) >= DRAWING_MIN_SIDE_PT and (paths > 400 or len(text) < 4000)
+                is_drawing = (
+                    max(width, height) >= DRAWING_MIN_SIDE_PT and (paths > 400 or len(text) < 4000)
+                ) or paths >= DRAWING_MIN_PATHS
                 plan = PagePlan(
-                    number=index + 1, width=width, height=height, text=text, chars=len(text.strip()),
-                    garbage_ratio=round(_garbage_ratio(raw), 4), image_coverage=round(coverage, 3),
-                    path_objects=paths, is_drawing=is_drawing,
+                    number=index + 1,
+                    width=width,
+                    height=height,
+                    text=text,
+                    chars=len(text.strip()),
+                    garbage_ratio=round(_garbage_ratio(raw), 4),
+                    image_coverage=round(coverage, 3),
+                    path_objects=paths,
+                    is_drawing=is_drawing,
                 )
+                plan.rotation = _text_rotation(textpage) if is_drawing else 0
                 if not is_drawing and plan.image_coverage < 0.6:
                     plan.image_boxes = _image_boxes(page, width, height, settings.ocr_image_min_fraction)
                 if is_drawing:
@@ -273,8 +319,9 @@ def _is_deep(settings: Settings, pages: int) -> bool:
     return settings.pdf_layout == "deep" and settings.pdf_layout_min_pages <= pages <= settings.pdf_layout_max_pages
 
 
-def _apply_structure(plans: list[PagePlan], styled: list[list[structure.StyledLine]], properties: dict[str, str],
-                     settings: Settings) -> None:
+def _apply_structure(
+    plans: list[PagePlan], styled: list[list[structure.StyledLine]], properties: dict[str, str], settings: Settings
+) -> None:
     """Remove running headers/footers and number the pages; mark headings from the type sizes read from the PDF.
 
     In deep mode (long documents) the headings come from the layout engine afterwards, so here the text is left without
@@ -324,7 +371,7 @@ def render_page_png(data: bytes, page_number: int, *, dpi: int = 200, max_pixels
 VISION_PROMPT = (
     "This image is one sheet of a construction drawing set. Return JSON only with these keys: "
     '"title", "drawing_number", "scale", "date", "summary" (2-4 sentences describing what '
-    'the sheet shows: plan/section/detail, areas, levels, key notes and dimensions you can read). Use null for '
+    "the sheet shows: plan/section/detail, areas, levels, key notes and dimensions you can read). Use null for "
     "anything you cannot read. Do not guess numbers."
 )
 
@@ -344,13 +391,25 @@ class PdfiumParser:
         self.cache_get: OcrCacheGet | None = None
         self.cache_put: OcrCachePut | None = None
         self.take_budget: BudgetTake | None = None
+        self.cad: Any = None  # rag.ingestion.cad_analysis.Options: how AutoCAD sheets are analysed (None: ordinary description)
 
-    def attach(self, *, ocr: Any = None, ocr_label: str = "none", ocr_is_cloud: bool = False, vision: Any = None,
-               cache_get: OcrCacheGet | None = None, cache_put: OcrCachePut | None = None,
-               take_budget: BudgetTake | None = None, protect_kinds: tuple[str, ...] | None = None) -> None:
+    def attach(
+        self,
+        *,
+        ocr: Any = None,
+        ocr_label: str = "none",
+        ocr_is_cloud: bool = False,
+        vision: Any = None,
+        cache_get: OcrCacheGet | None = None,
+        cache_put: OcrCachePut | None = None,
+        take_budget: BudgetTake | None = None,
+        protect_kinds: tuple[str, ...] | None = None,
+        cad: Any = None,
+    ) -> None:
         self.ocr, self.ocr_label, self.ocr_is_cloud = ocr, ocr_label, ocr_is_cloud
-        self.protect_kinds = protect_kinds  # None: no protection; else the kinds of value that keep a page away from a vision model
+        self.protect_kinds = protect_kinds
         self.vision = vision
+        self.cad = cad
         self.cache_get, self.cache_put, self.take_budget = cache_get, cache_put, take_budget
 
     async def parse_pdf(self, data: bytes, filename: str) -> ParsedDocument:
@@ -358,11 +417,11 @@ class PdfiumParser:
         warnings: list[str] = []
         await self._deepen_structure(data, plans, properties, warnings)
         pages: list[ParsedPage] = [await self._finish_page(data, plan, warnings) for plan in plans]
-        return ParsedDocument(pages=pages, format="pdf", title=properties.get("title"), properties=properties,
-                              warnings=warnings)
+        return ParsedDocument(pages=pages, format="pdf", title=properties.get("title"), properties=properties, warnings=warnings)
 
-    async def _deepen_structure(self, data: bytes, plans: list[PagePlan], properties: dict[str, str],
-                                warnings: list[str]) -> None:
+    async def _deepen_structure(
+        self, data: bytes, plans: list[PagePlan], properties: dict[str, str], warnings: list[str]
+    ) -> None:
         """Mark the document's headings from the layout engine's outline (long documents, `PDF_LAYOUT=deep`).
 
         The engine only says where the sections are; the text stays pdfium's. Any failure, a timeout, or an outline that
@@ -408,8 +467,11 @@ class PdfiumParser:
         text = plan.text if text_ok or plan.garbage_ratio < 0.2 else ""
         lines: list[TextLine] = []
         image_hash = None
-        quality: dict[str, float] = {"chars": float(plan.chars), "garbage_ratio": plan.garbage_ratio,
-                                     "image_coverage": plan.image_coverage}
+        quality: dict[str, float] = {
+            "chars": float(plan.chars),
+            "garbage_ratio": plan.garbage_ratio,
+            "image_coverage": plan.image_coverage,
+        }
 
         if (not text_ok or mostly_image) and not plan.is_drawing:
             ocr = await self._ocr_page(data, plan.number, warnings)
@@ -434,11 +496,15 @@ class PdfiumParser:
                 quality["ocr_confidence"] = result.confidence
                 plan.title_block = plan.title_block or parse_title_block(result.text)
 
-        if (plan.is_drawing and self.vision is not None and (len(plan.title_block) < 2 or len(text) < 300)
-                and not (self.protect_kinds is not None and has_sensitive(text, self.protect_kinds))):
+        if (
+            plan.is_drawing
+            and self.vision is not None
+            and not (self.protect_kinds is not None and has_sensitive(text, self.protect_kinds))
+        ):
             described = await self._describe_drawing(data, plan, warnings)
             if described:
                 summary = described.pop("summary", "")
+                plan.title_block = {k: v for k, v in plan.title_block.items() if not _is_label_text(v)}
                 for key, value in described.items():
                     if value and key not in plan.title_block:
                         plan.title_block[key] = str(value)
@@ -453,9 +519,21 @@ class PdfiumParser:
                 method = "text_layer+image_ocr"
 
         language = detect_language(text + " " + " ".join(c for t in plan.tables for r in t.rows for c in r))
-        return ParsedPage(number=plan.number, text=text, method=method, tables=plan.tables, lines=lines,
-                          width=plan.width, height=plan.height, language=language, is_drawing=plan.is_drawing,
-                          title_block=plan.title_block, quality=quality, image_hash=image_hash, label=plan.label)
+        return ParsedPage(
+            number=plan.number,
+            text=text,
+            method=method,
+            tables=plan.tables,
+            lines=lines,
+            width=plan.width,
+            height=plan.height,
+            language=language,
+            is_drawing=plan.is_drawing,
+            title_block=plan.title_block,
+            quality=quality,
+            image_hash=image_hash,
+            label=plan.label,
+        )
 
     async def _ocr_regions(self, data: bytes, plan: PagePlan, warnings: list[str]) -> str:
         """OCR the pictures embedded in a page that has a text layer; returns their text, one picture after another."""
@@ -463,8 +541,9 @@ class PdfiumParser:
             return ""
         from PIL import Image
 
-        png = await run_pdfium(render_page_png, data, plan.number, dpi=self.settings.ocr_render_dpi,
-                                 max_pixels=self.settings.ocr_max_pixels)
+        png = await run_pdfium(
+            render_page_png, data, plan.number, dpi=self.settings.ocr_render_dpi, max_pixels=self.settings.ocr_max_pixels
+        )
         page_image = Image.open(io.BytesIO(png))
         width, height = page_image.size
         found: list[str] = []
@@ -490,8 +569,9 @@ class PdfiumParser:
         if self.ocr is None:
             warnings.append(f"page {number}: no text layer and OCR is off")
             return None
-        png = await run_pdfium(render_page_png, data, number, dpi=self.settings.ocr_render_dpi,
-                               max_pixels=self.settings.ocr_max_pixels)
+        png = await run_pdfium(
+            render_page_png, data, number, dpi=self.settings.ocr_render_dpi, max_pixels=self.settings.ocr_max_pixels
+        )
         image_hash = hashlib.sha256(png).hexdigest()
         if self.cache_get is not None:
             cached = await self.cache_get(image_hash, self.ocr_label)
@@ -509,15 +589,39 @@ class PdfiumParser:
         if self.take_budget is not None and not await self.take_budget("vision_pages", 1):
             warnings.append(f"page {plan.number}: vision budget for today is used up")
             return None
-        png = await run_pdfium(render_page_png, data, plan.number, dpi=110, max_pixels=4_000_000)
-        message = ChatMessage("user", [
-            {"type": "text", "text": VISION_PROMPT},
-            {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()},
-        ])
+        # large enough to read small notes (about 2,400 px on the long side), turned upright when the sheet is
+        # landscape on a portrait page
+        long_side_in = max(plan.width, plan.height) / 72.0
+        png = await run_pdfium(
+            render_page_png, data, plan.number, dpi=int(min(250, max(110, 2400 / long_side_in))), max_pixels=6_000_000
+        )
+        if plan.rotation:
+            from PIL import Image
+
+            upright = Image.open(io.BytesIO(png)).rotate(-plan.rotation, expand=True)
+            buffer = io.BytesIO()
+            upright.save(buffer, format="PNG")
+            png = buffer.getvalue()
+        message = ChatMessage(
+            "user",
+            [
+                {"type": "text", "text": VISION_PROMPT},
+                {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()},
+            ],
+        )
         try:
-            result = await self.vision.complete([message], max_tokens=600, temperature=0.0)
+            for attempt in range(4):
+                try:
+                    result = await self.vision.complete([message], max_tokens=800, temperature=0.0)
+                    break
+                except (
+                    RateLimited
+                ) as exc:  # the provider asked us to slow down: wait as long as it says (up to 20 s), then try again
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(min(20.0, max(2.0, exc.retry_after)))
             raw = result.content
-            parsed = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+            parsed = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
         except Exception as exc:  # noqa: BLE001 - a vision failure must not fail the document
             warnings.append(f"page {plan.number}: vision description failed ({type(exc).__name__})")
             return None
@@ -537,5 +641,6 @@ def _merge_text(layer: str, ocr: str) -> str:
     return layer + ("\n" + "\n".join(extra) if extra else "")
 
 
-registry.register(Capability.PARSER, "local", local=True,
-                  description="pdfium text + pdfplumber tables + per-page OCR/vision routing")(PdfiumParser)
+registry.register(
+    Capability.PARSER, "local", local=True, description="pdfium text + pdfplumber tables + per-page OCR/vision routing"
+)(PdfiumParser)

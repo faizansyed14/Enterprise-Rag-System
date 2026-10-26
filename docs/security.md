@@ -46,8 +46,28 @@ verified.
 Type is detected from content, not the name; the extension must agree. Office files are checked for zip bombs
 (member count, expanded size, compression ratio); file names are normalised; size limits apply (`UPLOAD_MAX_MB` for the
 web, `MAX_FILE_MB` for sources). With `CLAMAV_URL` set, files are scanned before they are stored (see
-[commands.md](../commands.md)). Originals are never served inline from the original host: they download with
-`Content-Disposition: attachment`, and page images are rendered by the server.
+[commands.md](../commands.md)).
+
+Password-protected PDF, Office and ZIP files are refused with the reason `Protected: …` (`ingestion/protection.py`).
+
+How originals are served (`documents.py` `_INLINE_TYPES`):
+
+- PDF, PNG, JPEG, GIF, WebP, TXT and MD open inline, so the browser can show the cited page, with
+  `X-Content-Type-Options: nosniff`.
+- Every other type (HTML, SVG, Office …) downloads with `Content-Disposition: attachment`.
+- Page images are rendered by the server.
+
+ZIP folders are unpacked into a per-upload staging folder that only the uploader can commit. Abandoned staging folders
+are removed by the hourly maintenance job.
+
+> **Open findings (2026-10-23)**, details in [recommendations.md §4](recommendations.md#4-security-findings-still-open):
+>
+> 1. Delete, project-edit and reprocess check only *read* access. Any user who can see a document (for example one
+>    shared with `everyone`) can delete it.
+> 2. The research tools `read_pages` and `open_reference` do not exclude `local_only` documents when the answer model is
+>    in the cloud.
+> 3. The "only administrators can share uploads with everyone" check is unreachable, so any user can share an upload
+>    with everyone.
 
 ## Bank accounts, cards and ids with outside models
 
@@ -130,7 +150,16 @@ PyPI package; see [deviations.md](deviations.md) for the sources. Python depende
 with `package-lock.json`. Run `uv run pip-audit`, `npm audit --omit=dev` and `bandit` (included in `scripts/test.sh`)
 before each release, and pin image tags to digests in your registry.
 
-Audit status at release: `pip-audit` and `npm audit --omit=dev` (everything that ships in the runtime images) report no
+Audit status on 2026-10-23: `npm audit` no longer works because that endpoint was retired, so the npm packages were
+checked against the OSV database instead.
+
+- `pip-audit` reports advisories for **Pillow 12.3.0** and **certifi**.
+- **PyPDF2 3.0.1** (used by the layout engine) is unmaintained and should be replaced by `pypdf`.
+
+See [recommendations.md §4](recommendations.md#4-security-findings-still-open). The production setting for secure
+cookies is `COOKIE_SECURE` (not `SECURE_COOKIES`). With `APP_ENV=prod` it defaults to true.
+
+Audit status at first release (historical): `pip-audit` and `npm audit --omit=dev` (everything that ships in the runtime images) report no
 known vulnerabilities. `npm audit` including development tools reports 9 advisories (7 high) in build-time packages
 (`braces`, `micromatch`, `fast-glob` and `postcss-selector-parser`, pulled in by Tailwind CSS 3 and the ESLint
 configuration). They process only this repository's own source files during the build and are not present in the

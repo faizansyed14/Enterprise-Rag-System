@@ -8,10 +8,12 @@ import { ErrorNote, Spinner } from "@/components/ui/feedback";
 import { api, errorMessage } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { postStream } from "@/lib/sse";
-import type { ChatMessage, Citation, Filters, PlanInfo } from "@/lib/types";
+import { recallTrace, rememberTrace, upsertTrace } from "@/lib/trace-store";
+import type { ChatActivity, ChatMessage, Citation, Filters, PlanInfo, TraceItem } from "@/lib/types";
 
 import { citationOrder } from "./answer-text";
 import { Composer } from "./composer";
+import { DetailsPanel } from "./details-panel";
 import { AssistantMessage, UserMessage } from "./messages";
 import { SourcePreviewPane, type SourcePreview } from "./source-preview";
 
@@ -36,6 +38,13 @@ type ServerMessage = {
 let counter = 0;
 const uid = () => `m${Date.now().toString(36)}${(counter++).toString(36)}`;
 
+function addActivity(items: ChatActivity[] | undefined, stage: string, message: string): ChatActivity[] {
+  const current = items ?? [];
+  const last = current[current.length - 1];
+  if (last?.stage === stage && last.message === message) return current;
+  return [...current, { stage, message, at: Date.now() }];
+}
+
 function fromServer(m: ServerMessage): ChatMessage {
   return {
     key: m.id,
@@ -48,6 +57,7 @@ function fromServer(m: ServerMessage): ChatMessage {
     groundedness: m.groundedness,
     plan: m.role === "assistant" && m.filters && "query_type" in m.filters ? (m.filters as unknown as PlanInfo) : null,
     trace_id: m.trace_id,
+    trace: m.role === "assistant" ? recallTrace(m.id) : undefined,
     feedback_score: m.feedback_score,
     created_at: m.created_at,
     error: m.role === "assistant" && m.status === "error" && !m.content ? "This answer did not finish." : undefined,
@@ -76,6 +86,11 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const [model, setModel] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ text: string; nonce: number } | null>(null);
   const [preview, setPreview] = useState<SourcePreview | null>(null);
+  const [detailsKey, setDetailsKey] = useState<string | null>(null);
+  const detailsRef = useRef<string | null>(null);
+  useEffect(() => {
+    detailsRef.current = detailsKey;
+  }, [detailsKey]);
   const idRef = useRef<string | null>(conversationId ?? null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -84,13 +99,20 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const activeSourceKey = preview ? sourceKey(preview.citation) : null;
 
   const openSource = useCallback((citation: Citation, display: number) => {
+    setDetailsKey(null);
     setPreview({ citation, display });
   }, []);
+  const toggleDetails = useCallback((key: string) => {
+    setPreview(null);
+    setDetailsKey((current) => (current === key ? null : key));
+  }, []);
+  const closeDetails = useCallback(() => setDetailsKey(null), []);
 
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
     setPreview(null);
+    setDetailsKey(null);
     api<{ title: string; filters: Filters | null; messages: ServerMessage[] }>(`/conversations/${conversationId}`)
       .then((data) => {
         if (cancelled) return;
@@ -113,6 +135,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       setMessages([]);
       setFilters({});
       setPreview(null);
+      setDetailsKey(null);
       setLoadError(null);
       document.title = app.name;
     };
@@ -139,12 +162,25 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       setMessages((list) => [
         ...list,
         { key: uid(), role: "user", content: question, citations: [] },
-        { key, role: "assistant", content: "", citations: [], streaming: true, stage: "plan", stageText: "Understanding the question", steps: [] },
+        {
+          key,
+          role: "assistant",
+          content: "",
+          citations: [],
+          streaming: true,
+          stage: "plan",
+          stageText: "Understanding the question",
+          activities: [{ stage: "plan", message: "Understanding the question", at: Date.now() }],
+        },
       ]);
       stick.current = true;
+      setPreview(null);
+      setDetailsKey(key);
       const controller = new AbortController();
       abortRef.current = controller;
       const update = (fn: (m: ChatMessage) => ChatMessage) => setMessages((list) => list.map((m) => (m.key === key ? fn(m) : m)));
+      let trace: TraceItem[] = [];
+      let messageId: string | undefined;
       try {
         await postStream(
           "/chat",
@@ -164,12 +200,18 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                   stage: data.stage,
                   stageText: data.message,
                   model: data.model ?? m.model,
-                  steps: data.stage === "research" ? [...(m.steps ?? []), data.message] : m.steps,
+                  activities: addActivity(m.activities, data.stage, data.message),
                 }));
                 break;
               case "filters":
                 update((m) => ({ ...m, plan: data }));
                 break;
+              case "trace": {
+                trace = upsertTrace(trace, data);
+                const items = trace;
+                update((m) => ({ ...m, trace: items }));
+                break;
+              }
               case "delta":
                 update((m) => ({ ...m, content: m.content + data.text }));
                 break;
@@ -177,11 +219,12 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 update((m) => ({ ...m, citations: [...m.citations, data] }));
                 break;
               case "done":
+                messageId = data.message_id;
                 update((m) => {
                   const content = data.answer || m.content;
                   const citations = m.citations;
                   queueMicrotask(() => {
-                    if (!citations.length) return;
+                    if (!citations.length || detailsRef.current) return; // the details panel stays where the reader put it
                     const order = citationOrder(content);
                     const first = [...citations].sort((a, b) => (order.get(a.n) ?? 999) - (order.get(b.n) ?? 999))[0];
                     if (first) setPreview({ citation: first, display: order.get(first.n) ?? first.n });
@@ -211,12 +254,17 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         else update((m) => ({ ...m, streaming: false, error: errorMessage(e) }));
       } finally {
         update((m) => (m.streaming ? { ...m, streaming: false } : m));
+        rememberTrace(messageId, trace);
         abortRef.current = null;
         window.dispatchEvent(new Event(CONVERSATIONS_CHANGED));
       }
     },
     [filters, model],
   );
+
+  const detailsIndex = detailsKey ? messages.findIndex((m) => m.key === detailsKey) : -1;
+  const detailsMessage = detailsIndex >= 0 ? messages[detailsIndex] : null;
+  const detailsQuestion = detailsIndex > 0 && messages[detailsIndex - 1].role === "user" ? messages[detailsIndex - 1].content : undefined;
 
   const stop = () => abortRef.current?.abort();
   const choices = app.allow_model_switch ? app.model_choices : null;
@@ -281,6 +329,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                       showBadge={app.show_model_badge}
                       activeSourceKey={activeSourceKey}
                       onOpen={(citation, display) => openSource(citation, display)}
+                      onDetails={() => toggleDetails(m.key)}
+                      detailsOpen={detailsKey === m.key}
                       onRetry={
                         !streaming && index === messages.length - 1 && messages[index - 1]?.role === "user"
                           ? () => send(messages[index - 1].content)
@@ -294,7 +344,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
             <div className="px-4 pb-4 sm:px-6">
               <div className="mx-auto w-full max-w-[760px]">
                 {composer}
-                <p className="mt-2 text-center text-[11.5px] text-muted">
+                <p className="mt-2 text-center text-[12px] text-muted">
                   Answers come only from documents you can open. Check the cited page before acting on it.
                 </p>
               </div>
@@ -303,6 +353,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         )}
       </div>
       {preview ? <SourcePreviewPane preview={preview} onClose={() => setPreview(null)} /> : null}
+      {detailsMessage ? (
+        <DetailsPanel message={detailsMessage} question={detailsQuestion} onClose={closeDetails} />
+      ) : null}
     </div>
   );
 }

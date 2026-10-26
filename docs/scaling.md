@@ -1,8 +1,18 @@
-# Scaling to 5 TB
+# Scaling to 5 TB (and 10 TB)
 
 > **Status.** The architecture is designed for this size and the scaling mechanisms are exercised in tests, but this
 > build has **not been run against 5 TB**. The figures below are planning estimates from stated assumptions, not
 > measurements. Run a 5% pilot (250 GB, a representative sample) first and replace the assumptions with your numbers.
+>
+> **Updated 2026-10-23:** a side-by-side sizing for 2, 5 and 10 TB is in
+> [recommendations.md §2](recommendations.md#2-scaling-from-2-tb-to-10-tb). It covers RAM, disk and first-load time, and
+> lists what to change before a load of that size: Qdrant shards and quantisation, Postgres partitions and replica,
+> GPU embedding, separate worker pools, incremental reconcile, and two-stage retrieval. Three facts from the code
+> matter here:
+>
+> - `QDRANT_SHARDS` takes effect only when a collection is created.
+> - `chunks` and `pages` have 16 hash partitions.
+> - The daily `reconcile` makes one Qdrant count per version.
 
 ## From terabytes of files to a search index
 
@@ -56,6 +66,7 @@ modification time for folders and shares).
 
 | Component | Scale-out | Limit to watch |
 |---|---|---|
+| `redis` | `REDIS_MAXMEMORY` (cache size, LRU), `REDIS_MEM` | Nothing to scale at this size: one instance serves every API and worker replica. At very large scale use a managed Redis and set `REDIS_URL` |
 | `backend` | `API_WORKERS`, more replicas behind nginx | Postgres connections (`DB_POOL_SIZE`; use PgBouncer with `DB_PGBOUNCER=true`) |
 | `worker` | `WORKER_REPLICAS`, `WORKER_CONCURRENCY` | Model server throughput, provider rate limits (handled by cooldowns) |
 | `model-server` | More replicas behind a service name, GPU build | CPU threads (`MODEL_THREADS`) |
@@ -104,6 +115,6 @@ services:
     deploy: { replicas: 4 }
     environment: { WORKER_CONCURRENCY: "6" }
     volumes: [ "data:/data", "/mnt/nas/projects:/sources/projects:ro" ]   # a NAS folder for a "Server folder" source
-  api:                         # the API needs the same mount for the Test button on the Sources page
+  backend:                     # the API needs the same mount for the Test button on the Sources page
     volumes: [ "data:/data", "/mnt/nas/projects:/sources/projects:ro" ]
 ```

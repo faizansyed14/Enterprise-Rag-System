@@ -123,6 +123,9 @@ async def activate(services: Any, build_id: Any) -> dict[str, Any]:
                                                                                        live_at=datetime.now(UTC)))
     await services.vectors.point_alias(target.collection)
     await services.builds(refresh=True)
+    from rag.cache import get_cache
+
+    await get_cache(services.settings).bump_epoch()  # a different index answers differently
     log.warning("search now uses %s", target.collection)
     return {"live": target.collection}
 

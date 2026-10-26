@@ -90,9 +90,9 @@ def link_continued_tables(pages: Sequence[Sequence[ParsedTable]]) -> int:
 def interleave(lines: Sequence[dict], tops: Sequence[float]) -> str:
     """The page's text lines with a table marker at the height of each table, so that a caption stays above its own table.
 
-    `lines` are dicts with `text`, `top` and `x0` (pdfplumber's text lines outside the tables); `tops` is the top of each table, in
-    the order the tables are stored. Without markers the chunker puts every table after all of the page's text, and on a page of
-    "Table 10 caption, table, Table 11 caption, table" each caption ends up with the wrong table or none."""
+    `lines` are dicts with `text`, `top` and `x0` (pdfplumber's text lines outside the tables); `tops` is the top of each table,
+    in the order the tables are stored. Without markers the chunker puts every table after all of the page's text, and on a page
+    of "Table 10 caption, table, Table 11 caption, table" each caption ends up with the wrong table or none."""
     from rag.ingestion.formats import TABLE_MARKER
 
     pending = sorted(range(len(tops)), key=lambda i: tops[i])

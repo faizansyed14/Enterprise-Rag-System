@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { BrandIcon, ModelIcon, providerName, splitSpec } from "@/components/brand/brand";
 import { Button } from "@/components/ui/button";
 import { Badge, ErrorNote, Meter, Spinner, StatusBadge } from "@/components/ui/feedback";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Checkbox, Field, Input, Select } from "@/components/ui/fields";
 import { GridFillers, PageHeader, Section, Table, Td, Th } from "@/components/ui/layout";
 import { Dialog } from "@/components/ui/overlay";
 import { useToast } from "@/components/ui/toast";
@@ -35,7 +35,7 @@ type Switch = { role: string; from: string; to: string; by: string | null; reaso
 
 const GROUPS: { title: string; description: string; roles: string[] }[] = [
   { title: "Answering", description: "The AI models that write answers from the passages search finds. Choose any provider and model from the list, or turn one off.", roles: ["LLM_ANSWER", "LLM_ANSWER_HARD", "LLM_ANSWER_FALLBACK", "LLM_ROUTER"] },
-  { title: "Reading documents", description: "Used when files are uploaded. Scanned pages are read on this server for free by default; choose the vision model instead for better tables, handwriting and pictures (it costs a model call per page). Vision and metadata filling are optional extras that send pages or text to the model you pick.", roles: ["PARSER", "OCR", "VISION", "LLM_ENRICH"] },
+  { title: "Reading documents", description: "Used when files are uploaded. Scanned pages are read on this server for free by default; choose the vision model instead for better tables, handwriting and pictures (it costs a model call per page). Vision and metadata filling are optional extras that send pages or text to the model you pick.", roles: ["PARSER", "OCR", "VISION", "CAD_VISION", "LLM_ENRICH"] },
   { title: "Search", description: "Runs on this server and is set in .env, because changing it means re-indexing your documents.", roles: ["EMBEDDER", "RERANKER", "GROUNDEDNESS"] },
 ];
 
@@ -189,7 +189,11 @@ function SwitchDialog({ row, onClose, onDone }: { row: RoleRow; onClose: () => v
     setError(null);
     try {
       const result = await api<{ spec: string }>(`/models/${row.role}`, { method: "PUT", body: { spec: value, reason } });
-      toast(off ? `${ROLE_NAMES[row.role]} switched off` : `${ROLE_NAMES[row.role]} now uses ${result.spec}`);
+      toast(
+        off
+          ? `${ROLE_NAMES[row.role]} switched off`
+          : `${ROLE_NAMES[row.role]} now uses ${picked?.name || result.spec}`,
+      );
       onDone();
       onClose();
     } catch (e) {
@@ -237,10 +241,9 @@ function SwitchDialog({ row, onClose, onDone }: { row: RoleRow; onClose: () => v
                 {entry.models.length > 8 ? (
                   <div className="flex items-center gap-3">
                     <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search: claude, gpt, llama, gemini, qwen ..." aria-label="Search models" />
-                    <label className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-muted">
-                      <input type="checkbox" checked={freeOnly} onChange={(e) => setFreeOnly(e.target.checked)} />
+                    <Checkbox checked={freeOnly} onChange={setFreeOnly}>
                       Free only
-                    </label>
+                    </Checkbox>
                   </div>
                 ) : null}
                 <div className="max-h-64 overflow-y-auto rounded-xl border border-border" role="listbox" aria-label="Models">
@@ -299,8 +302,11 @@ function SwitchDialog({ row, onClose, onDone }: { row: RoleRow; onClose: () => v
             <div className="flex items-center gap-2.5 rounded-xl border border-border px-3 py-2.5">
               <ModelIcon provider={parts.provider} model={parts.model} size={28} />
               <div className="min-w-0 text-[13px]">
-                <div className="truncate font-medium">{parts.model || parts.provider}</div>
-                <div className="text-[12px] text-muted">Via {providerName(parts.provider)}</div>
+                <div className="truncate font-medium">{picked?.name || parts.model || parts.provider}</div>
+                <div className="truncate text-[12px] text-muted">
+                  Via {providerName(parts.provider)}
+                  {parts.model ? ` · ${parts.model}` : ""}
+                </div>
               </div>
             </div>
           ) : null}

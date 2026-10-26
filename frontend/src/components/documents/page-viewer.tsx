@@ -5,9 +5,12 @@ import { ArrowRightToLine, ExternalLink, Minus, Plus } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -221,7 +224,7 @@ function OfficeHtmlPreview({ info, zoom }: { info: PageInfo; zoom: number }) {
             {info.label}
           </div>
         ) : null}
-        <table className="min-w-full border-collapse" style={{ fontSize: `${em}px` }}>
+        <table data-zoom-target className="min-w-full border-collapse" style={{ fontSize: `${em}px` }}>
           <tbody>
             {table.rows.map((row, r) => (
               <tr key={r} className={r < headerRows ? "bg-[#e8eef7] font-semibold" : r % 2 ? "bg-[#f4f6f8]" : "bg-white"}>
@@ -246,6 +249,7 @@ function OfficeHtmlPreview({ info, zoom }: { info: PageInfo; zoom: number }) {
   const pageWidth = Math.max(320, Math.round(520 * zoom));
   return (
     <div
+      data-zoom-target
       className="paper mx-auto min-h-[60vh] rounded-sm bg-white px-8 py-8 shadow-soft ring-1 ring-black/5 dark:ring-white/10 sm:px-10 sm:py-10"
       style={{ width: `min(100%, ${pageWidth}px)`, fontSize: `${Math.max(13, 15 * zoom)}px`, lineHeight: 1.55 }}
     >
@@ -328,7 +332,7 @@ function PageExtractBody({ info, quote, emphasize }: { info: PageInfo; quote?: s
   return (
     <div className="space-y-5">
       {text ? (
-        <div dir="auto" className="source-text whitespace-pre-wrap text-[15px] leading-[1.65] text-foreground/95">
+        <div dir="auto" className="whitespace-pre-wrap font-sans text-[15px] leading-[1.65] text-foreground">
           {span ? (
             <>
               {text.slice(0, span[0])}
@@ -348,7 +352,7 @@ function PageExtractBody({ info, quote, emphasize }: { info: PageInfo; quote?: s
         <div className="space-y-3">
           {info.tables.map((table, t) => (
             <div key={t} className="overflow-x-auto rounded-xl border border-border bg-background">
-              <table className="w-full border-collapse text-[12.5px]">
+              <table className="w-full border-collapse text-[13.5px] text-foreground">
                 <tbody>
                   {table.rows.map((row, r) => (
                     <tr key={r} className={r < (table.header_rows || 0) ? "bg-surface font-medium" : undefined}>
@@ -475,7 +479,8 @@ function RawPage({
         </div>
       ) : (
         <div
-          className="relative mx-auto origin-top overflow-hidden rounded-sm bg-white shadow-soft ring-1 ring-black/5 transition-[width] duration-200 dark:ring-white/10"
+          data-zoom-target
+          className="relative mx-auto origin-top overflow-hidden rounded-sm bg-white shadow-soft ring-1 ring-black/5 dark:ring-white/10"
           style={{ width: `${Math.max(40, zoom * 100)}%`, aspectRatio: `${ratio}` }}
         >
           {near ? (
@@ -582,6 +587,52 @@ function scrollPaneToPage(root: HTMLElement, page: number, behavior: ScrollBehav
   root.scrollTo({ top: Math.max(0, top - 8), behavior });
 }
 
+function scrollAnchorIntoPlace(box: HTMLElement, boundary: HTMLElement, dx: number, dy: number) {
+  let el: HTMLElement | null = box.parentElement;
+  let remainX = dx;
+  let remainY = dy;
+  while (el) {
+    if (el.scrollWidth - el.clientWidth > 1 && remainX) {
+      const before = el.scrollLeft;
+      const max = el.scrollWidth - el.clientWidth;
+      el.scrollLeft = Math.min(max, Math.max(0, before + remainX));
+      remainX -= el.scrollLeft - before;
+    }
+    if (el.scrollHeight - el.clientHeight > 1 && remainY) {
+      const before = el.scrollTop;
+      const max = el.scrollHeight - el.clientHeight;
+      el.scrollTop = Math.min(max, Math.max(0, before + remainY));
+      remainY -= el.scrollTop - before;
+    }
+    if (el === boundary) break;
+    el = el.parentElement;
+  }
+}
+
+function zoomTargetAt(scroller: HTMLElement, x: number, y: number): HTMLElement | null {
+  const hit = document.elementFromPoint(x, y);
+  if (hit instanceof Element && scroller.contains(hit)) {
+    const marked = hit.closest("[data-zoom-target]");
+    if (marked instanceof HTMLElement) return marked;
+    const inside = hit.closest("[data-page]")?.querySelector("[data-zoom-target]");
+    if (inside instanceof HTMLElement) return inside;
+  }
+  let best: HTMLElement | null = null;
+  let bestDist = Infinity;
+  for (const el of scroller.querySelectorAll<HTMLElement>("[data-zoom-target]")) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = el;
+    }
+  }
+  return best;
+}
+
 /** Continuous document reader. `split` = original left + extract right; `raw` = zoomable original only. */
 export function PageViewer({
   documentId,
@@ -616,6 +667,8 @@ export function PageViewer({
   const [zoom, setZoom] = useState(() => (officeFmt ? 1.25 : 1));
   const [rawPage, setRawPage] = useState(page);
   const [extractPage, setExtractPage] = useState(page);
+  const [split, setSplit] = useState(50);
+  const panesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setZoom(officeFmt ? 1.25 : 1);
@@ -624,8 +677,62 @@ export function PageViewer({
   const leftRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
   const jumped = useRef(false);
+  const zoomAnchor = useRef<{ box: HTMLElement; fx: number; fy: number; x: number; y: number } | null>(null);
 
-  // Ctrl/⌘ + scroll zooms the preview, not the browser page.
+  const pinZoom = useCallback((clientX: number, clientY: number) => {
+    const scroller = leftRef.current;
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const inside = clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    const x = inside ? clientX : rect.left + rect.width / 2;
+    const y = inside ? clientY : rect.top + rect.height / 2;
+    const box = zoomTargetAt(scroller, x, y);
+    if (!box) {
+      zoomAnchor.current = null;
+      return;
+    }
+    const boxRect = box.getBoundingClientRect();
+    if (boxRect.width < 1 || boxRect.height < 1) {
+      zoomAnchor.current = null;
+      return;
+    }
+    zoomAnchor.current = {
+      box,
+      fx: (x - boxRect.left) / boxRect.width,
+      fy: (y - boxRect.top) / boxRect.height,
+      x,
+      y,
+    };
+  }, []);
+
+  const changeZoom = useCallback(
+    (dir: -1 | 1, clientX: number, clientY: number) => {
+      pinZoom(clientX, clientY);
+      setZoom((z) => {
+        const next = stepZoom(z, dir);
+        if (next === z) zoomAnchor.current = null;
+        return next;
+      });
+    },
+    [pinZoom],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current;
+    if (!anchor) return;
+    zoomAnchor.current = null;
+    const scroller = leftRef.current;
+    if (!scroller || !anchor.box.isConnected) return;
+    const boxRect = anchor.box.getBoundingClientRect();
+    scrollAnchorIntoPlace(
+      anchor.box,
+      scroller,
+      boxRect.left + anchor.fx * boxRect.width - anchor.x,
+      boxRect.top + anchor.fy * boxRect.height - anchor.y,
+    );
+  }, [zoom]);
+
+  // Ctrl/⌘ + scroll zooms the preview toward the cursor, not the browser page.
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -633,12 +740,11 @@ export function PageViewer({
       if (!(event.ctrlKey || event.metaKey)) return;
       event.preventDefault();
       event.stopPropagation();
-      const dir: -1 | 1 = event.deltaY > 0 ? -1 : 1;
-      setZoom((z) => stepZoom(z, dir));
+      changeZoom(event.deltaY > 0 ? -1 : 1, event.clientX, event.clientY);
     };
     root.addEventListener("wheel", onWheel, { passive: false });
     return () => root.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [changeZoom]);
 
   useEffect(() => {
     setRawPage(page);
@@ -686,6 +792,52 @@ export function PageViewer({
     reportPage(next);
   }, [rawPage, reportPage]);
 
+  useEffect(() => {
+    const saved = Number(sessionStorage.getItem("rag-preview-split"));
+    if (saved >= 22 && saved <= 78) setSplit(saved);
+  }, []);
+
+  const setSplitPct = useCallback((value: number) => {
+    const next = Math.min(78, Math.max(22, value));
+    setSplit(next);
+    sessionStorage.setItem("rag-preview-split", String(Math.round(next)));
+  }, []);
+
+  const onSplitPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const panes = panesRef.current;
+      if (!panes) return;
+      const move = (ev: PointerEvent) => {
+        const rect = panes.getBoundingClientRect();
+        const stacked = window.matchMedia("(max-width: 1023px)").matches;
+        const ratio = stacked ? (ev.clientY - rect.top) / rect.height : (ev.clientX - rect.left) / rect.width;
+        setSplitPct(ratio * 100);
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    },
+    [setSplitPct],
+  );
+
+  const onSplitKey = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      const step = event.shiftKey ? 10 : 4;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setSplitPct(split - step);
+      } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setSplitPct(split + step);
+      }
+    },
+    [setSplitPct, split],
+  );
+
   const onRightScroll = useCallback(() => {
     const right = rightRef.current;
     if (!right) return;
@@ -727,12 +879,12 @@ export function PageViewer({
           <span className="mr-0.5 text-[12px] text-muted tabular" title="Ctrl or ⌘ + scroll to zoom">
             {Math.round(zoom * 100)}%
           </span>
-          <IconButton label="Zoom out" onClick={() => setZoom((z) => stepZoom(z, -1))} disabled={zoom <= ZOOMS[0]}>
+          <IconButton label="Zoom out" onClick={(event) => changeZoom(-1, event.clientX, event.clientY)} disabled={zoom <= ZOOMS[0]}>
             <Minus size={15} />
           </IconButton>
           <IconButton
             label="Zoom in"
-            onClick={() => setZoom((z) => stepZoom(z, 1))}
+            onClick={(event) => changeZoom(1, event.clientX, event.clientY)}
             disabled={zoom >= ZOOMS[ZOOMS.length - 1]}
           >
             <Plus size={15} />
@@ -753,16 +905,15 @@ export function PageViewer({
       </div>
 
       <div
-        className={clsx(
-          "min-h-0 flex-1 overflow-hidden",
-          rawOnly ? "flex" : "grid grid-cols-1 divide-y divide-border lg:grid-cols-2 lg:divide-x lg:divide-y-0",
-        )}
+        ref={panesRef}
+        className={clsx("flex min-h-0 flex-1 overflow-hidden", rawOnly ? "flex-row" : "flex-col lg:flex-row")}
       >
         <section
           className={clsx(
-            "flex min-h-0 min-w-0 flex-col bg-[color-mix(in_srgb,var(--surface)_88%,#c8c4bc_12%)] dark:bg-surface",
-            rawOnly ? "h-full w-full" : "max-lg:h-[48%] lg:h-auto",
+            "flex min-h-0 min-w-0 flex-col overflow-hidden bg-[color-mix(in_srgb,var(--surface)_88%,#c8c4bc_12%)] dark:bg-surface",
+            rawOnly && "h-full flex-1",
           )}
+          style={rawOnly ? undefined : { flex: `0 0 ${split}%` }}
           aria-label="Original document"
         >
           {!rawOnly ? (
@@ -790,24 +941,40 @@ export function PageViewer({
         </section>
 
         {!rawOnly ? (
-          <section className="flex min-h-0 min-w-0 flex-col bg-background max-lg:h-[52%] lg:h-auto" aria-label="Extracted text">
-            <div className="flex items-center justify-between border-b border-border/70 px-4 py-1.5 lg:hidden">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">Extract</span>
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-valuemin={22}
+              aria-valuemax={78}
+              aria-valuenow={Math.round(split)}
+              aria-label="Resize original and extracted text"
+              tabIndex={0}
+              onPointerDown={onSplitPointerDown}
+              onKeyDown={onSplitKey}
+              className="group relative z-10 flex shrink-0 touch-none items-center justify-center bg-border outline-none focus-visible:bg-foreground/40 max-lg:h-2 max-lg:cursor-row-resize lg:w-2 lg:cursor-col-resize"
+            >
+              <span className="rounded-full bg-foreground/35 group-hover:bg-foreground/70 max-lg:h-0.5 max-lg:w-8 lg:h-8 lg:w-0.5" />
             </div>
-            <div ref={rightRef} onScroll={onRightScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-              {pages.map((n) => (
-                <ExtractPage
-                  key={n}
-                  documentId={documentId}
-                  versionId={versionId}
-                  pageNo={n}
-                  scrollRoot={rightRef}
-                  quote={quote}
-                  activePage={extractPage}
-                />
-              ))}
-            </div>
-          </section>
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background" aria-label="Extracted text">
+              <div className="flex items-center justify-between border-b border-border/70 px-4 py-1.5 lg:hidden">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">Extract</span>
+              </div>
+              <div ref={rightRef} onScroll={onRightScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                {pages.map((n) => (
+                  <ExtractPage
+                    key={n}
+                    documentId={documentId}
+                    versionId={versionId}
+                    pageNo={n}
+                    scrollRoot={rightRef}
+                    quote={quote}
+                    activePage={extractPage}
+                  />
+                ))}
+              </div>
+            </section>
+          </>
         ) : null}
       </div>
     </div>

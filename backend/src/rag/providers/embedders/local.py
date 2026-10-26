@@ -6,9 +6,11 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Sequence
 
+from rag.cache import digest, get_cache
 from rag.config.roles import Capability, RoleSpec
 from rag.config.settings import Settings
 from rag.errors import ConfigurationError
+from rag.monitoring.inspector import EMBED_SOURCE
 from rag.plugins.registry import registry
 from rag.providers.local_models import KNOWN_MODELS, LocalModelClient
 
@@ -54,8 +56,20 @@ class LocalEmbedder:
         cached = self._query_cache.get(text)
         if cached is not None:
             self._query_cache.move_to_end(text)
+            EMBED_SOURCE.set("memory cache")
             return cached
-        vector = (await self._embed([text], "query"))[0]
+        cache = get_cache(self.settings)
+        shared_key = f"vec:{self.slug}:{digest(text)}"
+        vector = await cache.get_floats(shared_key) if cache.enabled else None
+        if vector is not None and len(vector) == self.dims:
+            EMBED_SOURCE.set("shared cache")
+            await cache.stat("embed_hit")
+        else:
+            EMBED_SOURCE.set("model")
+            vector = (await self._embed([text], "query"))[0]
+            if cache.enabled:
+                await cache.stat("embed_miss")
+                await cache.set_floats(shared_key, vector, self.settings.cache_vector_ttl_s)
         self._query_cache[text] = vector
         while len(self._query_cache) > 2048:
             self._query_cache.popitem(last=False)

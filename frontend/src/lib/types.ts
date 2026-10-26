@@ -62,6 +62,24 @@ export type PlanInfo = {
   exclude_local_only?: boolean;
 };
 
+export type ChatActivity = {
+  stage: string;
+  message: string;
+  at: number;
+};
+
+/** One step of an answer for the Details panel (sent live as `trace` events; never stored on the server). */
+export type TraceItem = {
+  id: string;
+  seq: number;
+  at_ms: number;
+  kind: string;
+  title: string;
+  status: "running" | "done" | "error";
+  ms: number | null;
+  data: Record<string, any>;
+};
+
 export type ChatMessage = {
   key: string;
   id?: string;
@@ -79,6 +97,8 @@ export type ChatMessage = {
   stage?: string;
   stageText?: string;
   steps?: string[];
+  activities?: ChatActivity[];
+  trace?: TraceItem[];
   error?: string;
   errorCode?: string;
   created_at?: string;

@@ -129,7 +129,7 @@ def _safe_member(zf: zipfile.ZipFile, name: str) -> bytes:
 
 
 def read_odt(data: bytes) -> ParsedDocument:
-    from xml.etree import ElementTree as ET  # noqa: S405 - entity declarations are refused in _safe_member
+    from xml.etree import ElementTree as ET
 
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:

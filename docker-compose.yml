@@ -22,6 +22,7 @@ x-backend: &backend
   environment: &backend-env
     DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-rag}
     QDRANT_URL: http://qdrant:6333
+    REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
     LOCAL_MODELS_URL: http://model-server:8080
     OBJECT_STORE_URL: ${OBJECT_STORE_URL:-file:///data/originals}
     CACHE_DIR: /data/cache
@@ -35,6 +36,8 @@ x-backend: &backend
       condition: service_healthy
     qdrant:
       condition: service_started
+    redis:
+      condition: service_healthy
     model-server:
       condition: service_started
   networks: [internal]
@@ -92,6 +95,24 @@ services:
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
     mem_limit: ${QDRANT_MEM:-64g}
+    networks: [internal]
+    logging: *logging
+
+  # A cache, not a database: least-recently-used eviction, nothing written to disk. Holds shared embeddings, rerank scores, verified
+  # answers and rate-limit counters (rag/cache.py). If it is down the application keeps working, only slower.
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru --save '' --appendonly no"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    init: true
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEM:-384m}
     networks: [internal]
     logging: *logging
 

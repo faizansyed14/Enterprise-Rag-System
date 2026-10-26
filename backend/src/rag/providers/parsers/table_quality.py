@@ -1,8 +1,8 @@
 """Repair, or reject, tables that rule-based extraction has shredded.
 
 Ruled-table extraction works for plain grids. Tables with merged cells, shaded bands or hairlines between text lines come out as
-a wide grid in which most cells are empty: one real column is spread over several, and every wrapped line of a cell is a row of its
-own. Labelling such rows with their column names gives text that is worse than the page text it replaced.
+a wide grid in which most cells are empty: one real column is spread over several, and every wrapped line of a cell is a row
+of its own. Labelling such rows with their column names gives text that is worse than the page text it replaced.
 
   tidy(rows)      drops columns that are empty throughout and joins neighbouring columns that are never both filled in the same
                   row (fragments of one column cut by a stray vertical rule). No text is lost.
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-MIN_FILL = 0.34        # a usable table has at least this share of its cells filled ...
+MIN_FILL = 0.34  # a usable table has at least this share of its cells filled ...
 MAX_FRAGMENT_ROWS = 0.6  # ... and no more than this share of rows holding a single cell
 
 

@@ -74,7 +74,3 @@ def has_arabic(text: str) -> bool:
 
 def is_arabic_char(ch: str) -> bool:
     return bool(_ARABIC_CHAR.match(ch))
-
-
-def collapse_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()

@@ -24,6 +24,8 @@ type Process = { id: string; kind: string; host: string; pid: number; started_at
 type Alert = { id: number; rule: string; severity: string; message: string; count: number; first_seen_at: string; last_seen_at: string };
 type Failure = { id: number; kind: string; lane: string; status: string; attempts: number; last_error: string; finished_at: string | null };
 type ModelError = { started_at: string; role: string | null; provider: string | null; model: string | null; error: string | null; trace_id: string | null };
+type CacheFamily = { hits: number; misses: number; hit_rate: number | null };
+type CacheStats = { enabled: boolean; available?: boolean; keys?: number; memory?: string; answer?: CacheFamily; embed?: CacheFamily; rerank?: CacheFamily };
 type Summary = {
   window_minutes: number;
   chat: { requests: number; errors: number; p50_ms: number; p95_ms: number };
@@ -33,6 +35,7 @@ type Summary = {
   processes: Process[];
   queue: Queue;
   alerts: Alert[];
+  cache?: CacheStats;
   failures: Failure[];
   model_errors: ModelError[];
 };
@@ -138,6 +141,44 @@ function ModelCalls({ rows }: { rows: ModelRow[] }) {
         ))}
       </tbody>
     </Table>
+  );
+}
+
+/** What the shared cache (Redis) has saved: repeated answers, embeddings and rerank scores. */
+function CachePanel({ cache }: { cache: CacheStats | undefined }) {
+  if (!cache?.enabled) return <p className="px-5 py-6 text-[13px] text-muted">Redis is not set up: caches stay inside each process.</p>;
+  if (!cache.available) return <p className="px-5 py-6 text-[13px] text-warning">Redis is set up but not reachable; the application is using its in-process fallbacks.</p>;
+  const rows: [string, CacheFamily | undefined][] = [
+    ["Answers (no model call)", cache.answer],
+    ["Rerank scores", cache.rerank],
+    ["Question embeddings", cache.embed],
+  ];
+  return (
+    <div>
+      <Table>
+        <thead>
+          <tr>
+            <Th>Cached</Th>
+            <Th align="right">Hits</Th>
+            <Th align="right">Misses</Th>
+            <Th align="right">Hit rate</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, f]) => (
+            <tr key={label}>
+              <Td>{label}</Td>
+              <Td align="right">{compact(f?.hits ?? 0)}</Td>
+              <Td align="right">{compact(f?.misses ?? 0)}</Td>
+              <Td align="right">{f?.hit_rate == null ? "—" : `${Math.round(f.hit_rate * 100)}%`}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+      <p className="px-5 py-3 text-[12px] text-muted">
+        {compact(cache.keys ?? 0)} entries · {cache.memory} in memory. An answer is served from the cache only for the same question, the same access and an unchanged library.
+      </p>
+    </div>
   );
 }
 
@@ -392,6 +433,10 @@ function Monitor() {
                 <Processes processes={processes} />
               </Section>
             </div>
+
+            <Section title="Cache" description="Redis: shared between all processes, emptied by any change to the library">
+              <CachePanel cache={data.cache} />
+            </Section>
 
             <Section title="Failed jobs" description={data.content.failed_items ? `${compact(data.content.failed_items)} files could not be read` : undefined}>
               <Failures failures={data.failures} onRetried={() => void reload()} />

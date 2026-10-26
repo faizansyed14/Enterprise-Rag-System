@@ -103,6 +103,15 @@ class Settings(BaseSettings):
     llm_router_timeout_s: float = 3.0
     llm_max_retries: int = 2
     embedder_batch: int = 32
+    # Shared cache and request counters (Redis). Empty = not used: caches stay per process, rate limits stay in Postgres.
+    redis_url: str = ""
+    cache_answers: bool = True            # serve an identical, verified answer again (see rag/cache.py for what the key holds)
+    cache_answer_ttl_s: int = 86_400
+    # The chat's Details panel (every step, search score and model call of an answer, live; never stored): all | admin | off.
+    # It shows only what the asker may open, and model messages as they were sent (masked).
+    chat_details: str = "all"
+    cache_vector_ttl_s: int = 604_800
+    cache_rerank_ttl_s: int = 604_800
     # requests to the model server in flight at once per process; a big upload otherwise sends 8 or more at once, the CPU-bound
     # server cannot answer them inside the timeout and every one fails and is retried
     embedder_concurrency: int = 2
@@ -111,7 +120,8 @@ class Settings(BaseSettings):
     # Let people pick any model OpenRouter serves (listed from its public catalogue), not only those in MODEL_CHOICES. Spend is
     # still bounded by DAILY_BUDGET_USD and by your OpenRouter account limits.
     allow_any_openrouter_model: bool = True
-    # Which OpenRouter models the pickers list and the server accepts: comma-separated ids, `free` for every free model, `*` for all.
+    # Which OpenRouter models the pickers list and the server accepts: comma-separated ids, `free` for every
+    # free model, `*` for all.
     openrouter_models: str = "anthropic/claude-haiku-5.5,openai/gpt-4o-mini,free"
     allow_ui_model_switch: bool = True
     show_model_badge: bool = True
@@ -154,7 +164,14 @@ class Settings(BaseSettings):
     principal_sync_minutes: int = 60
     bootstrap_admin_email: str = ""
     bootstrap_admin_password: SecretStr | None = None
-    upload_max_mb: int = 200
+    upload_max_mb: int = 200  # one file, and each file inside an uploaded ZIP
+    # An uploaded ZIP folder is opened into a staging folder first (ingestion/archive.py) and only the files ticked in the
+    # dialog are uploaded; nginx accepts up to 5 GB. Staging lives on the shared data volume (empty: CACHE_DIR/upload-staging).
+    upload_zip_max_mb: int = 4096
+    upload_staging_dir: str = ""
+    # File types left out. Connectors and e-mail attachments never read them (skipped, with the reason shown). In the upload
+    # dialog they are listed but unticked, and can be ticked to upload them: nothing is blocked there.
+    skip_extensions: str = "jpg,jpeg,png"
     clamav_url: str = ""
     rate_limit_chat_per_min: int = 20
     rate_limit_uploads_per_hour: int = 200
@@ -165,9 +182,12 @@ class Settings(BaseSettings):
     # are replaced by placeholders in every request to a cloud chat model and put back into the reply here, and a page that
     # contains one is not sent to a cloud vision model as an image (see docs/security.md).
     privacy_mask_for_models: bool = True
-    privacy_kinds: str = ("iban,card,account,swift,ssn,emirates_id,passport,payment_ref,secret,tax_id,email,phone,long_number,custom")
-    # Your own additions: labels whose value is always masked ("Salary, Visa number" masks the text after "Salary:"), and regular
-    # expressions separated by ";;" (for example "EMP-\d{5};;PRJ[A-Z]{3}\d{4}"). No restart of the data is needed, only of the services.
+    privacy_kinds: str = (
+        "iban,card,account,swift,ssn,emirates_id,passport,payment_ref,secret,tax_id,email,phone,long_number,custom"
+    )
+    # Your own additions: labels whose value is always masked ("Salary, Visa number" masks the text after "Salary:"),
+    # and regular expressions separated by ";;" (for example "EMP-\d{5};;PRJ[A-Z]{3}\d{4}"). No restart of the data is
+    # needed, only of the services.
     privacy_extra_labels: str = ""
     privacy_extra_patterns: str = ""
     # true removes the values from the stored text for good (they cannot then be found or shown), see docs/security.md
@@ -194,10 +214,11 @@ class Settings(BaseSettings):
     # How much of the final score the cross-encoder decides (the rest is the fused retrieval score). A cross-encoder alone
     # reads keyword and identifier queries badly, so it is mixed in, and skipped for short or identifier questions.
     rerank_blend: float = 0.8
-    # The share above is the most the cross-encoder gets. With `rerank_adaptive` it falls towards `rerank_blend_floor` the more
-    # of the question's word pairs a top candidate quotes verbatim (a copied sentence needs no second opinion; a paraphrase does).
-    # Measured on 407 questions: no reranker 93.7 / 97.6 / 0.958 (page@1 / page@3 / MRR), this setting 95.0 / 98.4 / 0.967;
-    # paraphrase questions 73.5 -> 82.3 page@1, table questions 54.5 -> 72.7. Fixed shares from 0.3 to 0.8 are within two questions.
+    # The share above is the most the cross-encoder gets. With `rerank_adaptive` it falls towards `rerank_blend_floor` the
+    # more of the question's word pairs a top candidate quotes verbatim (a copied sentence needs no second opinion; a
+    # paraphrase does). Measured on 407 questions: no reranker 93.7 / 97.6 / 0.958 (page@1 / page@3 / MRR), this setting
+    # 95.0 / 98.4 / 0.967; paraphrase questions 73.5 -> 82.3 page@1, table questions 54.5 -> 72.7. Fixed shares from 0.3 to
+    # 0.8 are within two questions.
     rerank_adaptive: bool = True
     rerank_blend_floor: float = 0.2
     rerank_adapt_power: float = 0.5
@@ -233,6 +254,39 @@ class Settings(BaseSettings):
     candidate_docs: int = 40
     evidence_passages: int = 12
     evidence_per_document: int = 3
+    # "all the X" questions read many whole documents instead of the best dozen passages (rag/answering/aggregate.py)
+    aggregate_max_docs: int = 60  # documents read per question
+    vision_concurrency: int = 3  # pages sent to the vision model at once, per worker (the provider answers 429 above its limit)
+    vision_retries: int = 1  # tries again (after a wait) when both vision models answered 429, before the local OCR reads the page
+    # The vision model used when VISION fails a request (HTTP 429 and the like): provider/model, empty = none. It is a paid model,
+    # used only for the pages the first one could not read.
+    vision_fallback: str = "openrouter/anthropic/claude-haiku-5.5"
+    # The CAD_VISION role: AutoCAD drawings (.dwg, .dxf) have their own analysis (rag/ingestion/cad_analysis.py). Each sheet is
+    # drawn at high resolution, cut into overlapping tiles, and sent with its overview in ONE request to this model, which writes a
+    # structured Markdown report (tenant schedule, services, parking, detail references ...). provider/model, chosen here or on
+    # the Models page; "none" = the ordinary short sheet description (VISION) is used instead. A paid model: one request per
+    # sheet carries about 13 images.
+    cad_vision: str = "openrouter/anthropic/claude-sonnet-5.5"
+    cad_tiles: str = "4x3"  # columns x rows of tiles per sheet (turned round for a tall drawing)
+    cad_render_px: int = 6000  # width in pixels the sheet is drawn at before it is cropped and cut (about 360 dpi on A3)
+    cad_max_sheets: int = 3  # sheets per file that get the full analysis; the rest get the short description
+    cad_send_text: bool = True  # also send the text read from the file, to check spelling of labels (exact, not OCR)
+    cad_max_tokens: int = 16000  # the report's length limit (reasoning counts against it; an empty reply is asked for again with twice this)
+    cad_colour: bool = True  # show the drawing in its own colours and solid fills (what allocated and vacant units look like)
+    cad_reasoning: str = "low"  # how much hidden thinking an OpenRouter CAD model may do (minimal, low, medium, high; empty = its default)
+    cad_timeout_s: float = 300.0
+    strategy_planner: bool = True  # a model picks how to answer each question (rag/answering/strategy.py)
+    read_files_max_docs: int = 40  # documents the planner may have read in full for one question
+    # Text of all of them together (about 100k tokens). Short documents are read completely and the long ones share what is
+    # left, so 40 licences are read whole while a 300-page contract is read as far as its fair share reaches.
+    read_files_budget_chars: int = 400_000
+    named_file_chars: int = 24_000  # how much of a file the question names is read for a short answer
+    sufficiency_check: bool = True  # before writing, check the evidence covers every part of the question
+    aggregate_doc_chars: int = 4000  # how much of each document is read (the first pages)
+    aggregate_batch_chars: int = 16000  # documents read together in one model call
+    aggregate_parallel: int = 4  # model calls at once
+    aggregate_max_relevant: int = 40  # documents that can reach the answer
+    aggregate_chars_per_doc: int = 1800  # text of each relevant document passed to the answer
     family_demotion: float = 0.6
     name_boost: float = 1.0  # added to every chunk of a file whose name the question spells out
     fusion_weights: str = ""
@@ -247,7 +301,6 @@ class Settings(BaseSettings):
     chunk_overlap: float = 0.15
     chunk_min_tokens: int = 48
     chunker_version: str = "c4"
-    analyzer_version: str = "bm25v2"
     max_file_mb: int = 2048
     ocr_render_dpi: int = 200
     # Longest-edge budget for OCR renders: OCR cost grows with pixels, and an A0 sheet at 200 dpi is ~70 megapixels.
@@ -310,6 +363,10 @@ class Settings(BaseSettings):
         return tuple(k.strip() for k in self.privacy_kinds.split(",") if k.strip())
 
     @property
+    def skip_extension_set(self) -> frozenset[str]:
+        return frozenset(e.strip().lower().lstrip(".") for e in self.skip_extensions.split(",") if e.strip())
+
+    @property
     def model_choice_lines(self) -> list[str]:
         return parse_choices(self.model_choices)
 
@@ -349,7 +406,7 @@ class Settings(BaseSettings):
         url = self.database_url.get_secret_value()
         for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://", "postgresql+asyncpg://", "postgres://"):
             if url.startswith(prefix):
-                url = "postgresql://" + url[len(prefix):]
+                url = "postgresql://" + url[len(prefix) :]
         return url.replace("postgresql://", "postgresql+psycopg://", 1) if async_driver else url
 
     def secret(self, name: str) -> str | None:
@@ -380,4 +437,3 @@ def set_settings(settings: Settings | None) -> None:
     """Replace the process settings (tests, CLI flags). Pass None to go back to reading the environment."""
     _SettingsHolder.override = settings
     _load.cache_clear()
-

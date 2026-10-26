@@ -6,6 +6,7 @@ export const ROLE_NAMES: Record<string, string> = {
   LLM_ROUTER: "Question planning",
   LLM_ENRICH: "Metadata filling",
   VISION: "Drawing and image reading",
+  CAD_VISION: "AutoCAD drawing analysis",
   EMBEDDER: "Embeddings",
   RERANKER: "Reranking",
   GROUNDEDNESS: "Answer checking",

@@ -63,7 +63,7 @@ async def main(golden: str, reranker: str, configs: list[str]) -> None:
         cache.update(pickle.loads(cache_file.read_bytes()))
         print(f"{len(cache)} rerank scores loaded from {cache_file.name}", flush=True)
     settings.rerank_cache_size = 1_000_000
-    principals = await principals_of(os.environ.get("BENCH_AS", "admin@example.com"))
+    principals = await principals_of(os.environ.get("BENCH_AS") or os.environ["BOOTSTRAP_ADMIN_EMAIL"])
     items = bench.load_questions(golden)
     print(f"{len(items)} questions, reranker {reranker}", flush=True)
     header = "config".ljust(34) + "".join(f"{k:>22}" for k in KINDS)

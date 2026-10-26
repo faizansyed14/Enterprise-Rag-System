@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sqlalchemy import text
 
 from rag.db.engine import maintain_partitions, transaction
+from rag.ingestion import archive
 from rag.jobs import queue
 from rag.jobs.worker import JobContext, handler
 from rag.monitoring import alerts
@@ -44,4 +46,5 @@ async def maintenance(ctx: JobContext) -> None:
         await conn.execute(text("DELETE FROM alerts WHERE resolved_at < now() - interval '90 days'"))
         await conn.execute(text("DELETE FROM daily_budgets WHERE day < (now() - interval '90 days')::date"))
     removed = await queue.cleanup_finished(s.keep_done_jobs_days)
+    await asyncio.to_thread(archive.sweep, s)  # opened ZIP folders nobody uploaded or discarded
     log.info("maintenance: partitions %s, %s finished jobs removed", parts, removed)

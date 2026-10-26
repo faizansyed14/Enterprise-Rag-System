@@ -33,7 +33,12 @@ Rules:
     and do not compute figures the passages do not ask for (a percentage of a total, for example) unless the question asks.
 12. When a passage states the value that was asked for, give it plainly. Do not hedge it with remarks about what the
     excerpt might not show. When several documents give different values for the same thing, list each with its file name
-    and say which file each comes from, instead of choosing one."""
+    and say which file each comes from, instead of choosing one.
+13. When the question needs arithmetic (a total, a count, a difference, an average), take the numbers the passages state,
+    write the calculation and work out the result yourself (for example 2240.7 + 2287.95 = 4528.65). Never leave a sum
+    unworked or say a total "cannot be stated" when its parts are in the passages.
+14. If the passages answer only part of the question, answer that part and say plainly which part the documents you can
+    access do not cover."""
 
 RESEARCH_SYSTEM = """You are researching a question in a construction document library before it is answered.
 You can call tools to search, read pages, and follow references. Gather the passages needed to answer
@@ -58,6 +63,9 @@ def answer_user_message(question: str, passages: list[Passage], history: list[di
         recent = history[-4:]
         parts.append("<conversation>\n" + "\n".join(f"{h['role']}: {h['content'][:600]}" for h in recent)
                      + "\n</conversation>")
+    from datetime import date
+
+    parts.append(f"<today>{date.today().isoformat()}</today>")  # "currently valid", "expired", "next month" need a date
     parts.append(format_evidence(passages) if passages else "<evidence>\n(no passages found)\n</evidence>")
     parts.append(f"<question>\n{question}\n</question>")
     return "\n\n".join(parts)

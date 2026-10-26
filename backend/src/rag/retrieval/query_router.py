@@ -110,7 +110,7 @@ class QueryRouter:
             return plan
         try:
             refined = await asyncio.wait_for(self._llm(question, history or []), timeout=self.timeout_s)
-        except (TimeoutError, Exception) as exc:  # noqa: BLE001 - the rules' plan is always a valid fallback
+        except (TimeoutError, Exception) as exc:
             plan.reasons.append(f"router model skipped ({type(exc).__name__})")
             return plan
         standalone = (refined.get("standalone") or "").strip()

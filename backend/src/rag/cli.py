@@ -185,7 +185,8 @@ def check() -> None:
 
 
 @users_app.command("create")
-def users_create(email: str = typer.Option(...), password: str = typer.Option(..., prompt=True, hide_input=True),
+def users_create(email: str = typer.Option(...),
+                 password: str = typer.Option(..., prompt=True, hide_input=True, envvar="RAG_NEW_PASSWORD"),
                  name: str = "", admin: bool = False, groups: str = "") -> None:
     """Create a local account (groups: comma-separated local group names)."""
     from rag.db.engine import transaction
@@ -200,6 +201,34 @@ def users_create(email: str = typer.Option(...), password: str = typer.Option(..
         typer.echo(f"created {email} ({'admin' if admin else 'user'})")
 
     _run(main())
+
+
+@users_app.command("set-password")
+def users_set_password(email: str = typer.Option(...),
+                       password: str = typer.Option(..., prompt=True, hide_input=True, envvar="RAG_NEW_PASSWORD",
+                                                    help="Or set RAG_NEW_PASSWORD, so it is not typed on a command line")) -> None:
+    """Change the password of a local account. Unlocks it and ends its other sessions."""
+    from sqlalchemy import update
+
+    from rag.db import schema
+    from rag.db.engine import transaction
+    from rag.security.auth import hash_password
+
+    async def main() -> int:
+        async with transaction() as conn:
+            row = (await conn.execute(
+                update(schema.users)
+                .where(schema.users.c.email == email.strip(), schema.users.c.auth_provider == "local")
+                .values(password_hash=hash_password(password), failed_logins=0, locked_until=None)
+                .returning(schema.users.c.id))).first()
+            if row is None:
+                typer.echo(f"no local account {email}")
+                return 1
+            await conn.execute(schema.sessions.delete().where(schema.sessions.c.user_id == row.id))
+        typer.echo(f"password changed for {email}; signed out everywhere")
+        return 0
+
+    raise typer.Exit(_run(main()))
 
 
 # ---- sources -------------------------------------------------------------------------------------------------------------
@@ -251,7 +280,6 @@ def sources_purge(name: str, yes: bool = typer.Option(False, "--yes", help="Do n
     files can be ingested again from scratch, for instance after changing how they are parsed."""
     from sqlalchemy import text
 
-    from rag.db import schema
     from rag.db.engine import transaction
     from rag.providers.storage.objects import blob_key
     from rag.providers.vectorstore.qdrant import version_filter
@@ -296,7 +324,7 @@ def sources_purge(name: str, yes: bool = typer.Option(False, "--yes", help="Do n
 
 @app.command()
 def reprocess(source: str = typer.Option("", help="Only this source (default: every source)"),
-              force: bool = typer.Option(True, help="Also chunk and embed again (needed for the new chunks to reach the index)")) -> None:
+              force: bool = typer.Option(True, help="Also chunk and embed again (so the new chunks reach the index)")) -> None:
     """Run metadata extraction (and, with --force, chunking and embedding) again from the text already stored.
 
     Use it after improving how documents are read or described: no file is read again, so it costs only the embedding of
@@ -310,22 +338,40 @@ def reprocess(source: str = typer.Option("", help="Only this source (default: ev
     async def main() -> None:
         await _services()
         async with transaction() as conn:
-            rows = (await conn.execute(text(
-                "SELECT i.id, i.content_sha256, i.source_id FROM source_items i JOIN sources s ON s.id = i.source_id "
-                "JOIN blobs b ON b.sha256 = i.content_sha256 AND b.extracted_at IS NOT NULL "
-                "WHERE i.status = 'active' AND (:name = '' OR s.name = :name)"), {"name": source})).all()
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT i.id, i.content_sha256, i.source_id FROM source_items i JOIN sources s ON s.id = i.source_id "
+                        "JOIN blobs b ON b.sha256 = i.content_sha256 AND b.extracted_at IS NOT NULL "
+                        "WHERE i.status = 'active' AND (:name = '' OR s.name = :name)"
+                    ),
+                    {"name": source},
+                )
+            ).all()
             stamp = int(__import__("time").time())
-            await queue.enqueue_many(conn, [NewJob("enrich", {"item_id": str(r.id), "force": force}, lane="bulk",
-                                                   dedupe_key=f"enrich:{r.id}:{r.content_sha256}:re{stamp}", source_id=r.source_id)
-                                            for r in rows])
+            await queue.enqueue_many(
+                conn,
+                [
+                    NewJob(
+                        "enrich",
+                        {"item_id": str(r.id), "force": force},
+                        lane="bulk",
+                        dedupe_key=f"enrich:{r.id}:{r.content_sha256}:re{stamp}",
+                        source_id=r.source_id,
+                    )
+                    for r in rows
+                ],
+            )
         typer.echo(f"queued {len(rows)} documents for reprocessing")
 
     _run(main())
 
 
 @app.command()
-def reparse(source: str = typer.Option("", help="Only this source (default: every source)"),
-            file_format: str = typer.Option("", "--format", help="Only files of this format (pdf, docx, xlsx, ...)")) -> None:
+def reparse(
+    source: str = typer.Option("", help="Only this source (default: every source)"),
+    file_format: str = typer.Option("", "--format", help="Only files of this format (pdf, docx, xlsx, ...)"),
+) -> None:
     """Read the stored files again with the current parsers, then redo metadata, chunks and embeddings.
 
     Use it after a parser improvement (layout, tables, OCR, glyph repair): the original files are not fetched again, only the
@@ -339,14 +385,30 @@ def reparse(source: str = typer.Option("", help="Only this source (default: ever
     async def main() -> None:
         await _services()
         async with transaction() as conn:
-            rows = (await conn.execute(text(
-                "SELECT DISTINCT ON (b.sha256) b.sha256, i.name, i.source_id FROM source_items i "
-                "JOIN sources s ON s.id = i.source_id JOIN blobs b ON b.sha256 = i.content_sha256 "
-                "WHERE i.status = 'active' AND b.extracted_at IS NOT NULL AND (:name = '' OR s.name = :name) "
-                "AND (:fmt = '' OR b.format = :fmt) ORDER BY b.sha256"), {"name": source, "fmt": file_format})).all()
-            await queue.enqueue_many(conn, [NewJob("extract", {"sha256": r.sha256, "name": r.name, "force": True}, lane="bulk",
-                                                   dedupe_key=f"extract:{r.sha256}:force", source_id=r.source_id)
-                                            for r in rows])
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT DISTINCT ON (b.sha256) b.sha256, i.name, i.source_id FROM source_items i "
+                        "JOIN sources s ON s.id = i.source_id JOIN blobs b ON b.sha256 = i.content_sha256 "
+                        "WHERE i.status = 'active' AND b.extracted_at IS NOT NULL AND (:name = '' OR s.name = :name) "
+                        "AND (:fmt = '' OR b.format = :fmt) ORDER BY b.sha256"
+                    ),
+                    {"name": source, "fmt": file_format},
+                )
+            ).all()
+            await queue.enqueue_many(
+                conn,
+                [
+                    NewJob(
+                        "extract",
+                        {"sha256": r.sha256, "name": r.name, "force": True},
+                        lane="bulk",
+                        dedupe_key=f"extract:{r.sha256}:force",
+                        source_id=r.source_id,
+                    )
+                    for r in rows
+                ],
+            )
         typer.echo(f"queued {len(rows)} files to be read again")
 
     _run(main())
@@ -366,8 +428,10 @@ def sources_sync(name: str, full: bool = False) -> None:
             row = (await conn.execute(select(schema.sources.c.id).where(schema.sources.c.name == name))).first()
             if row is None:
                 raise typer.BadParameter(f"no source named {name}")
-            await queue.enqueue(conn, NewJob("sync_source", {"source_id": str(row.id), "full": full},
-                                             lane="interactive", dedupe_key=f"sync:{row.id}"))
+            await queue.enqueue(
+                conn,
+                NewJob("sync_source", {"source_id": str(row.id), "full": full}, lane="interactive", dedupe_key=f"sync:{row.id}"),
+            )
         typer.echo("sync queued; a worker will pick it up")
 
     _run(main())
@@ -376,13 +440,19 @@ def sources_sync(name: str, full: bool = False) -> None:
 # ---- demo ------------------------------------------------------------------------------------------------------------------
 
 
-DEMO_USERS = [("admin@demo.local", "Admin", True, []), ("engineer@demo.local", "Site Engineer", False, []),
-              ("commercial@demo.local", "Commercial Manager", False, ["commercial"])]
+DEMO_USERS = [
+    ("admin@demo.local", "Admin", True, []),
+    ("engineer@demo.local", "Site Engineer", False, []),
+    ("commercial@demo.local", "Commercial Manager", False, ["commercial"]),
+]
 
 
 @demo_app.command("seed")
-def demo_seed(path: str = "./data/demo", password: str = typer.Option("ChangeMe-Demo-2025", help="Demo password"),
-              wait: bool = typer.Option(False, help="Process the jobs here instead of waiting for workers")) -> None:
+def demo_seed(
+    path: str = "./data/demo",
+    password: str = typer.Option("ChangeMe-Demo-2025", help="Demo password"),
+    wait: bool = typer.Option(False, help="Process the jobs here instead of waiting for workers"),
+) -> None:
     """Write the demo library, register it as two sources and create demo users."""
     from sqlalchemy import func, select
 
@@ -400,23 +470,34 @@ def demo_seed(path: str = "./data/demo", password: str = typer.Option("ChangeMe-
     async def main() -> None:
         async with transaction() as conn:
             for email, name, is_admin, groups in DEMO_USERS:
-                exists = (await conn.execute(select(func.count()).select_from(schema.users)
-                                             .where(func.lower(schema.users.c.email) == email))).scalar_one()
+                exists = (
+                    await conn.execute(
+                        select(func.count()).select_from(schema.users).where(func.lower(schema.users.c.email) == email)
+                    )
+                ).scalar_one()
                 if not exists:
-                    user_id = await create_user(conn, email=email, password=password, display_name=name,
-                                                is_admin=is_admin)
+                    user_id = await create_user(conn, email=email, password=password, display_name=name, is_admin=is_admin)
                     await replace_principals(conn, user_id, [f"lgroup:{g}" for g in groups], "local")
             ids = []
-            for name, folder, acl in (("Demo library", folders["public"], ["everyone"]),
-                                      ("Demo commercial", folders["restricted"], ["lgroup:commercial"])):
+            for name, folder, acl in (
+                ("Demo library", folders["public"], ["everyone"]),
+                ("Demo commercial", folders["restricted"], ["lgroup:commercial"]),
+            ):
                 row = (await conn.execute(select(schema.sources.c.id).where(schema.sources.c.name == name))).first()
                 if row is None:
-                    row = (await conn.execute(schema.sources.insert().values(
-                        name=name, kind="filesystem", config={"root": str(folder)}, default_acl=acl,
-                        schedule_minutes=60).returning(schema.sources.c.id))).first()
+                    row = (
+                        await conn.execute(
+                            schema.sources.insert()
+                            .values(
+                                name=name, kind="filesystem", config={"root": str(folder)}, default_acl=acl, schedule_minutes=60
+                            )
+                            .returning(schema.sources.c.id)
+                        )
+                    ).first()
                 ids.append(row.id)
-                await queue.enqueue(conn, NewJob("sync_source", {"source_id": str(row.id)}, lane="interactive",
-                                                 dedupe_key=f"sync:{row.id}"))
+                await queue.enqueue(
+                    conn, NewJob("sync_source", {"source_id": str(row.id)}, lane="interactive", dedupe_key=f"sync:{row.id}")
+                )
         typer.echo(f"demo library written to {root}; sources queued for sync")
         typer.echo("users: " + ", ".join(u[0] for u in DEMO_USERS) + f" (password: {password})")
         if wait:
@@ -436,8 +517,11 @@ def demo_seed(path: str = "./data/demo", password: str = typer.Option("ChangeMe-
 
 
 @app.command()
-def ask(question: str, as_user: str = typer.Option(..., "--as", help="E-mail of the user whose access applies"),
-        model: str = typer.Option("", help="A MODEL_CHOICES line to use instead of LLM_ANSWER")) -> None:
+def ask(
+    question: str,
+    as_user: str = typer.Option(..., "--as", help="E-mail of the user whose access applies"),
+    model: str = typer.Option("", help="A MODEL_CHOICES line to use instead of LLM_ANSWER"),
+) -> None:
     """Ask a question from the terminal (prints the answer, citations and timings)."""
     from sqlalchemy import func, select
 
@@ -450,14 +534,16 @@ def ask(question: str, as_user: str = typer.Option(..., "--as", help="E-mail of 
         services = await _services()
         try:
             async with transaction() as conn:
-                user = (await conn.execute(select(schema.users).where(func.lower(schema.users.c.email)
-                                                                      == as_user.lower()))).first()
+                user = (
+                    await conn.execute(select(schema.users).where(func.lower(schema.users.c.email) == as_user.lower()))
+                ).first()
                 if user is None:
                     raise typer.BadParameter(f"no user {as_user}")
                 principals = await principals_for(conn, user)
             outcome = AnswerOutcome()
-            async for event in Answerer(services).answer(question, principals=principals, model_choice=model or None,
-                                                         outcome=outcome):
+            async for event in Answerer(services).answer(
+                question, principals=principals, model_choice=model or None, outcome=outcome
+            ):
                 if event["event"] == "delta":
                     typer.echo(event["data"]["text"], nl=False)
                 elif event["event"] == "status":
@@ -465,12 +551,17 @@ def ask(question: str, as_user: str = typer.Option(..., "--as", help="E-mail of 
                 elif event["event"] == "citation":
                     c = event["data"]
                     mark = "✓" if c["verified"] else "?"
-                    typer.secho(f"\n[{c['n']}] {mark} {c['doc_number'] or c['file_name']} "
-                                f"p.{c['page']}: “{c['quote'][:160]}”", fg="cyan")
+                    typer.secho(
+                        f"\n[{c['n']}] {mark} {c['doc_number'] or c['file_name']} " f"p.{c['page']}: “{c['quote'][:160]}”",
+                        fg="cyan",
+                    )
                 elif event["event"] == "done":
                     d = event["data"]
-                    typer.secho(f"\nstatus={d['status']} model={d['model']} grounded={d['groundedness']} "
-                                f"total={d['timings_ms'].get('total')}ms", dim=True)
+                    typer.secho(
+                        f"\nstatus={d['status']} model={d['model']} grounded={d['groundedness']} "
+                        f"total={d['timings_ms'].get('total')}ms",
+                        dim=True,
+                    )
                 elif event["event"] == "error":
                     typer.secho(f"\nerror: {event['data']['message']}", fg="red")
         finally:
@@ -539,14 +630,47 @@ def index_rollback() -> None:
     _run(main())
 
 
+# ---- cache -----------------------------------------------------------------------------------------------------------------
+
+cache_app = typer.Typer(help="The shared cache (Redis)", no_args_is_help=True)
+app.add_typer(cache_app, name="cache")
+
+
+@cache_app.command("stats")
+def cache_stats() -> None:
+    """Hit rates, entries and memory of the shared cache."""
+    from rag.cache import get_cache
+
+    async def main() -> None:
+        _print(await get_cache().stats())
+
+    _run(main())
+
+
+@cache_app.command("clear")
+def cache_clear() -> None:
+    """Make every cached answer out of date at once (embeddings and rerank scores stay: they never change)."""
+    from rag.cache import get_cache
+
+    async def main() -> None:
+        cache = get_cache()
+        await cache.bump_epoch()
+        typer.echo(f"cached answers invalidated (epoch {await cache.epoch()})" if cache.enabled else "Redis is not configured")
+
+    _run(main())
+
+
 # ---- evaluation ------------------------------------------------------------------------------------------------------------
 
 
 @eval_app.command("run")
-def eval_run(golden_set: str = typer.Option("demo", "--set"), answer: bool = True,
-             as_user: str = typer.Option("", "--as", help="Search with this user's access (default: everyone)"),
-             output: str = typer.Option("", help="Write per-question results as JSON to this file"),
-             min_hit5: float = typer.Option(0.0, help="Exit 1 if hit@5 is below this (CI gate)")) -> None:
+def eval_run(
+    golden_set: str = typer.Option("demo", "--set"),
+    answer: bool = True,
+    as_user: str = typer.Option("", "--as", help="Search with this user's access (default: everyone)"),
+    output: str = typer.Option("", help="Write per-question results as JSON to this file"),
+    min_hit5: float = typer.Option(0.0, help="Exit 1 if hit@5 is below this (CI gate)"),
+) -> None:
     from sqlalchemy import func, select
 
     from rag.db import schema
@@ -561,16 +685,19 @@ def eval_run(golden_set: str = typer.Option("demo", "--set"), answer: bool = Tru
             principals = ["everyone"]
             if as_user:
                 async with transaction() as conn:
-                    user = (await conn.execute(select(schema.users).where(
-                        func.lower(schema.users.c.email) == as_user.lower()))).first()
+                    user = (
+                        await conn.execute(select(schema.users).where(func.lower(schema.users.c.email) == as_user.lower()))
+                    ).first()
                     principals = await principals_for(conn, user)
             rows, metrics = await evaluate(services, load_set(golden_set), principals, answer=answer)
         finally:
             await services.aclose()
         for r in rows:
             m = r["metrics"]
-            typer.echo(f"{r['item_id']:20} hit@5={m.get('hit@5', '-')!s:5} mrr={m.get('mrr', '-')!s:6} "
-                       f"facts={m.get('facts', '-')!s:5} status={m.get('status', '-')!s:10} {r['latency_ms']:.0f}ms")
+            typer.echo(
+                f"{r['item_id']:20} hit@5={m.get('hit@5', '-')!s:5} mrr={m.get('mrr', '-')!s:6} "
+                f"facts={m.get('facts', '-')!s:5} status={m.get('status', '-')!s:10} {r['latency_ms']:.0f}ms"
+            )
         _print(metrics)
         if output:
             payload = json.dumps({"metrics": metrics, "items": rows}, indent=2, default=str, ensure_ascii=False)
@@ -581,11 +708,13 @@ def eval_run(golden_set: str = typer.Option("demo", "--set"), answer: bool = Tru
 
 
 @eval_app.command("bench")
-def eval_bench(golden: str = typer.Option(..., help="JSONL question file (see rag.evaluation.retrieval_bench)"),
-               as_user: str = typer.Option("", "--as", help="Search with this user's access (default: everyone)"),
-               output: str = typer.Option("", help="Write per-question results and the summary as JSON"),
-               rerank: bool = typer.Option(True, help="Use the reranker when one is configured"),
-               set_: list[str] = typer.Option([], "--set", help="Override a setting for this run: name=value")) -> None:
+def eval_bench(
+    golden: str = typer.Option(..., help="JSONL question file (see rag.evaluation.retrieval_bench)"),
+    as_user: str = typer.Option("", "--as", help="Search with this user's access (default: everyone)"),
+    output: str = typer.Option("", help="Write per-question results and the summary as JSON"),
+    rerank: bool = typer.Option(True, help="Use the reranker when one is configured"),
+    set_: list[str] = typer.Option([], "--set", help="Override a setting for this run: name=value"),
+) -> None:
     """Retrieval-only benchmark (no language model): document, page and citation hit rates per question kind."""
     from sqlalchemy import func, select
 
@@ -600,16 +729,19 @@ def eval_bench(golden: str = typer.Option(..., help="JSONL question file (see ra
             for pair in set_:
                 key, _, value = pair.partition("=")
                 current = getattr(services.settings, key)
-                setattr(services.settings, key, type(current)(value) if not isinstance(current, bool)
-                        else value.lower() in {"1", "true", "yes"})
+                setattr(
+                    services.settings,
+                    key,
+                    type(current)(value) if not isinstance(current, bool) else value.lower() in {"1", "true", "yes"},
+                )
             principals = ["everyone"]
             if as_user:
                 async with transaction() as conn:
-                    user = (await conn.execute(select(schema.users).where(
-                        func.lower(schema.users.c.email) == as_user.lower()))).first()
+                    user = (
+                        await conn.execute(select(schema.users).where(func.lower(schema.users.c.email) == as_user.lower()))
+                    ).first()
                     principals = await principals_for(conn, user)
-            rows, summary = await retrieval_bench.run(services, retrieval_bench.load_questions(golden), principals,
-                                                      rerank=rerank)
+            rows, summary = await retrieval_bench.run(services, retrieval_bench.load_questions(golden), principals, rerank=rerank)
         finally:
             await services.aclose()
         typer.echo(retrieval_bench.format_table(summary))
@@ -626,6 +758,7 @@ def eval_bench(golden: str = typer.Option(..., help="JSONL question file (see ra
 @models_app.command("list")
 def models_list() -> None:
     """The model each role uses, where it is configured, and what is missing."""
+
     async def main() -> None:
         services = await _services()
         try:
@@ -699,8 +832,10 @@ def jobs_retry_dead() -> None:
 
 
 @privacy_app.command("check")
-def privacy_check(document: str = typer.Argument(..., help="Part of the file name"),
-                  full: bool = typer.Option(False, "--full", help="Print every chunk, not only those with a masked value")) -> None:
+def privacy_check(
+    document: str = typer.Argument(..., help="Part of the file name"),
+    full: bool = typer.Option(False, "--full", help="Print every chunk, not only those with a masked value"),
+) -> None:
     """Show what a cloud model would receive from a document: its text with bank and id numbers replaced by placeholders.
 
     The page you see in the Documents view is your own server's copy and is not what is sent. This is what is sent."""
@@ -716,15 +851,24 @@ def privacy_check(document: str = typer.Argument(..., help="Part of the file nam
 
     async def main() -> None:
         async with transaction() as conn:
-            rows = (await conn.execute(text(
-                "SELECT i.name, c.chunk_no, c.page_start, c.header, c.text FROM chunks c JOIN versions v ON v.id = c.version_id "
-                "JOIN source_items i ON i.content_sha256 = v.blob_sha256 WHERE v.state = 'live' AND i.name ILIKE :n "
-                "ORDER BY i.name, c.chunk_no"), {"n": f"%{document}%"})).all()
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT i.name, c.chunk_no, c.page_start, c.header, c.text FROM chunks c "
+                        "JOIN versions v ON v.id = c.version_id "
+                        "JOIN source_items i ON i.content_sha256 = v.blob_sha256 WHERE v.state = 'live' AND i.name ILIKE :n "
+                        "ORDER BY i.name, c.chunk_no"
+                    ),
+                    {"n": f"%{document}%"},
+                )
+            ).all()
         if not rows:
             typer.echo(f"no stored document matches {document!r}")
             raise typer.Exit(1)
-        typer.echo(f"privacy shield: {'ON' if settings.privacy_mask_for_models else 'OFF'}   kinds: {', '.join(kinds)}   "
-                   f"whole-document hold-back: {'ON' if settings.privacy_auto_local_only else 'off'}\n")
+        typer.echo(
+            f"privacy shield: {'ON' if settings.privacy_mask_for_models else 'OFF'}   kinds: {', '.join(kinds)}   "
+            f"whole-document hold-back: {'ON' if settings.privacy_auto_local_only else 'off'}\n"
+        )
         total: dict[str, int] = {}
         unmasked_runs = 0
         for name, chunk_no, page, header, body in rows:
@@ -740,32 +884,47 @@ def privacy_check(document: str = typer.Argument(..., help="Part of the file nam
                 typer.echo(f"--- {name}  chunk {chunk_no}  page {page}   masked: {', '.join(found) or 'nothing'}")
                 typer.echo(masked[:1500])
                 if leftovers:
-                    typer.echo(f"    ! {len(leftovers)} line(s) still hold a run of 9+ digits (not recognised as a bank or id value)")
-        typer.echo(f"\n{len(rows)} chunks; masked values: {total or 'none'}; lines with long digit runs left as they are: {unmasked_runs}")
+                    typer.echo(
+                        f"    ! {len(leftovers)} line(s) still hold a run of 9+ digits (not recognised as a bank or id value)"
+                    )
+        typer.echo(
+            f"\n{len(rows)} chunks; masked values: {total or 'none'}; "
+            f"lines with long digit runs left as they are: {unmasked_runs}"
+        )
 
     _run(main())
 
 
 @privacy_app.command("calls")
 def privacy_calls(hours: int = typer.Option(24, help="How far back"), limit: int = typer.Option(30)) -> None:
-    """Recent calls to cloud chat and vision models and how many sensitive values the shield masked in each (a count, never a value)."""
+    """Recent calls to cloud chat and vision models and how many sensitive values the shield masked in each (a count,
+    never a value)."""
     from sqlalchemy import text
 
     from rag.db.engine import transaction
 
     async def main() -> None:
         async with transaction() as conn:
-            rows = (await conn.execute(text(
-                "SELECT started_at, kind, role, provider, model, status, attrs->>'masked_values' AS masked FROM spans "
-                "WHERE kind IN ('chat','vision') AND started_at > now() - make_interval(hours => :h) "
-                "ORDER BY started_at DESC LIMIT :n"), {"h": hours, "n": limit})).all()
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT started_at, kind, role, provider, model, status, attrs->>'masked_values' AS masked FROM spans "
+                        "WHERE kind IN ('chat','vision') AND started_at > now() - make_interval(hours => :h) "
+                        "ORDER BY started_at DESC LIMIT :n"
+                    ),
+                    {"h": hours, "n": limit},
+                )
+            ).all()
         if not rows:
             typer.echo("no model calls in that period")
             return
         typer.echo(f"{'time':<9}{'role':<20}{'model':<46}{'status':<8}shield")
         for at, kind, role, provider, model, status, masked in rows:
-            shield = ("not recorded: an image sent after a local check, a local model, or a call made before this was tracked" if masked in (None, "null")
-                      else f"on, {masked} value(s) masked")
+            shield = (
+                "not recorded: an image sent after a local check, a local model, or a call made before this was tracked"
+                if masked in (None, "null")
+                else f"on, {masked} value(s) masked"
+            )
             typer.echo(f"{at:%H:%M:%S}  {role or kind:<20}{provider}/{model}"[:77].ljust(77) + f"{status:<8}{shield}")
 
     _run(main())

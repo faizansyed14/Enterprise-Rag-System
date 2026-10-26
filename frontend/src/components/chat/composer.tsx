@@ -4,9 +4,10 @@ import clsx from "clsx";
 import { ArrowUp, Check, ChevronDown, SlidersHorizontal, Sparkles, Square, X } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
-import { ModelIcon, modelLabel, providerName, splitSpec } from "@/components/brand/brand";
+import { ModelIcon, resolveModelDisplay, splitSpec } from "@/components/brand/brand";
+import { Input } from "@/components/ui/fields";
 import { Popover } from "@/components/ui/overlay";
-import { docTypeLabel, titleCase } from "@/lib/format";
+import { docTypeLabel } from "@/lib/format";
 import { api } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import type { Facet, Facets, Filters } from "@/lib/types";
@@ -57,10 +58,11 @@ function FilterPanel({ filters, onChange }: { filters: Filters; onChange: (f: Fi
   };
   return (
     <div className="w-[min(560px,calc(100vw-2rem))] p-3">
-      <div className="mb-3 px-1">
+      <div className="mb-1 px-1">
         <span className="text-[13px] font-semibold">Search only in</span>
+        <p className="mt-0.5 text-[12px] text-muted">Filters restrict which documents are searched for this question.</p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {GROUPS.map((group) => (
           <div key={group.key} className="min-w-0">
             <div className="px-2 pb-1 text-[12px] font-medium text-muted">{group.label}</div>
@@ -93,14 +95,27 @@ function price(m: CatalogModel): string {
 function ModelPicker({ choices, value, onChange }: { choices: string[]; value: string | null; onChange: (v: string | null) => void }) {
   const [open, setOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const current = value ? splitSpec(value) : null;
+  const catalogNames = catalog?.openrouter ?? null;
+  const triggerLabel = value
+    ? resolveModelDisplay(value, catalogNames).title
+    : "Automatic";
 
-  // The catalogue is fetched the first time the list opens, not on every page load.
   useEffect(() => {
-    if (!open || catalog) return;
-    api<Catalog>("/chat/models").then(setCatalog).catch(() => setCatalog(null));
-  }, [open, catalog]);
+    if (!open || catalog || loading) return;
+    setLoading(true);
+    setLoadError(false);
+    api<Catalog>("/chat/models")
+      .then(setCatalog)
+      .catch(() => {
+        setCatalog(null);
+        setLoadError(true);
+      })
+      .finally(() => setLoading(false));
+  }, [open, catalog, loading]);
 
   const local = catalog?.local ?? "extractive/default";
   const shortlist = (catalog?.shortlist ?? choices).filter((spec) => spec !== local);
@@ -118,7 +133,10 @@ function ModelPicker({ choices, value, onChange }: { choices: string[]; value: s
           onChange(spec);
           setOpen(false);
         }}
-        className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-surface-hover"
+        className={clsx(
+          "flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 hover:bg-surface-hover",
+          on && "bg-surface-hover",
+        )}
       >
         {parts ? <ModelIcon provider={parts.provider} model={parts.model} size={26} /> : <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border border-border"><Sparkles size={14} aria-hidden /></span>}
         <span className="min-w-0 flex-1">
@@ -139,33 +157,49 @@ function ModelPicker({ choices, value, onChange }: { choices: string[]; value: s
       align="right"
       className="w-[360px] p-1.5"
       trigger={(props) => (
-        <button type="button" {...props} className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12.5px] text-muted transition-colors hover:bg-surface-hover hover:text-foreground">
+        <button
+          type="button"
+          {...props}
+          aria-label={`Answer model: ${triggerLabel}. Changes which model writes the answer.`}
+          title="Answer model — affects answer generation"
+          className="flex h-8 max-w-[220px] items-center gap-1.5 rounded-lg px-2 text-[12.5px] text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+        >
           {current ? <ModelIcon provider={current.provider} model={current.model} size={16} tile={false} /> : <Sparkles size={14} aria-hidden />}
-          <span className="max-w-[160px] truncate">{current ? modelLabel(current.provider, current.model) : "Automatic"}</span>
+          <span className="min-w-0 truncate">{triggerLabel}</span>
           <ChevronDown size={13} aria-hidden />
         </button>
       )}
     >
       {heading("Answer with")}
+      <p className="px-2.5 pb-1 text-[11.5px] text-muted">The selected model affects answer generation, not document search.</p>
       {option(null, "Automatic", "The configured model; the stronger one for multi-part questions")}
       {option(local, "Local (no model)", "Sentences taken from the passages. Free, nothing leaves this server")}
       {shortlist.length ? heading("Shortlist") : null}
       {shortlist.map((spec) => {
-        const parts = splitSpec(spec);
-        return option(spec, modelLabel(parts.provider, parts.model), `Via ${providerName(parts.provider)}`);
+        const display = resolveModelDisplay(spec, catalogNames);
+        return option(spec, display.title, display.detail);
       })}
+      {loading && !catalog ? <p className="px-2.5 py-2 text-[12px] text-muted">Loading models…</p> : null}
+      {loadError ? <p className="px-2.5 py-2 text-[12px] text-danger">Could not load the model catalogue.</p> : null}
       {catalog?.openrouter.length ? (
         <>
           {heading(`All OpenRouter models (${catalog.openrouter.length})`)}
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search: claude, gpt, llama, gemini, qwen, free ..."
-            aria-label="Search OpenRouter models"
-            className="mx-1 mb-1 h-8 w-[calc(100%-8px)] rounded-lg border border-border bg-transparent px-2.5 text-[12.5px] outline-none focus:border-border-strong"
-          />
+          <div className="px-1.5 pb-1">
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search: claude, gpt, llama, gemini, qwen, free …"
+              aria-label="Search OpenRouter models"
+            />
+          </div>
           <div className="max-h-64 overflow-y-auto">
-            {matches.slice(0, MAX_LISTED).map((m) => option(`openrouter/${m.id}`, m.name, `${m.vision ? "Text + images" : "Text only"} · ${m.id} · ${price(m)}`))}
+            {matches.slice(0, MAX_LISTED).map((m) =>
+              option(
+                `openrouter/${m.id}`,
+                m.name,
+                `${m.vision ? "Text + images" : "Text only"} · ${m.id}${price(m) ? ` · ${price(m)}` : ""}`,
+              ),
+            )}
             {matches.length > MAX_LISTED ? <p className="px-2.5 py-1.5 text-[12px] text-muted">{matches.length - MAX_LISTED} more: narrow the search.</p> : null}
             {!matches.length ? <p className="px-2.5 py-1.5 text-[12px] text-muted">No model matches.</p> : null}
           </div>
@@ -205,7 +239,6 @@ export function Composer({
   const [appliedDraft, setAppliedDraft] = useState(draft);
   const ref = useRef<HTMLTextAreaElement>(null);
 
-  // A suggestion was picked: put its text in the box (state adjusted during render, then focus in an effect).
   if (draft !== appliedDraft) {
     setAppliedDraft(draft);
     if (draft) setText(draft.text);
@@ -243,11 +276,12 @@ export function Composer({
     onFiltersChange({ ...filters, [key]: (filters[key] ?? []).filter((v) => v !== value) });
   };
   const count = activeFilterCount(filters);
+  const canSend = Boolean(text.trim()) && !streaming;
 
   return (
-    <div className="rounded-2xl border border-border bg-composer shadow-soft focus-within:border-border-strong">
+    <div className="rounded-2xl border border-border bg-composer shadow-soft transition-[border-color] duration-150 focus-within:border-border-strong">
       {chips.length ? (
-        <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+        <div className="flex flex-wrap gap-1.5 px-3 pt-3" aria-label="Active search filters">
           {chips.map((chip) => (
             <span key={`${chip.key}:${chip.value}`} className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-background pl-2 pr-1 text-[12px]">
               {chip.label}
@@ -268,12 +302,13 @@ export function Composer({
         rows={1}
         value={text}
         autoFocus={autoFocus}
+        disabled={streaming}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
         placeholder="Ask about drawings, specifications, RFIs, minutes…"
-        className="block max-h-[220px] min-h-[52px] w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 placeholder:text-muted/80 focus:outline-none"
+        className="block max-h-[220px] min-h-[52px] w-full resize-none bg-transparent px-3 pb-2 pt-3.5 text-[15px] leading-6 placeholder:text-muted/80 focus:outline-none disabled:opacity-60 sm:px-4"
       />
-      <div className="flex items-center gap-1 px-2 pb-2">
+      <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
         <Popover
           open={filtersOpen}
           onOpenChange={setFiltersOpen}
@@ -282,9 +317,11 @@ export function Composer({
             <button
               type="button"
               {...props}
+              aria-label={count ? `Filters, ${count} active` : "Filters"}
+              title="Restrict document search"
               className={clsx(
-                "flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12.5px] transition-colors hover:bg-surface-hover",
-                count ? "text-foreground" : "text-muted hover:text-foreground",
+                "flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12.5px] transition-colors duration-150 hover:bg-surface-hover",
+                count ? "bg-surface-hover text-foreground" : "text-muted hover:text-foreground",
               )}
             >
               <SlidersHorizontal size={14} aria-hidden />
@@ -297,23 +334,35 @@ export function Composer({
         <div className="ml-auto flex items-center gap-1">
           {modelChoices ? <ModelPicker choices={modelChoices} value={model} onChange={onModelChange} /> : null}
           {streaming ? (
-            <button type="button" onClick={onStop} aria-label="Stop" title="Stop" className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-strong transition-colors hover:bg-surface-hover">
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop generating"
+              title="Stop — interrupts the active response"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-strong transition-colors duration-150 hover:bg-surface-hover"
+            >
               <Square size={12} fill="currentColor" aria-hidden />
             </button>
           ) : (
             <button
               type="button"
               onClick={submit}
-              disabled={!text.trim()}
-              aria-label="Ask"
-              title="Ask (Enter)"
-              className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-accent-fg transition-opacity disabled:opacity-30"
+              disabled={!canSend}
+              aria-label="Send question"
+              title="Send (Enter). Shift+Enter for a new line"
+              className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-accent-fg transition-opacity duration-150 disabled:opacity-30"
             >
               <ArrowUp size={16} strokeWidth={2.2} aria-hidden />
             </button>
           )}
         </div>
       </div>
+      <p className="border-t border-border/70 px-3 py-1.5 text-[11.5px] text-muted sm:px-4">
+        Enter send · Shift+Enter new line
+        {streaming ? " · Stop interrupts" : ""}
+        {count ? " · Filters restrict search" : ""}
+        {modelChoices ? " · Model affects the answer" : ""}
+      </p>
     </div>
   );
 }

@@ -28,7 +28,6 @@ from rag.jobs.retry_policy import Decision
 log = logging.getLogger(__name__)
 
 LANES: dict[str, int] = {"control": 0, "interactive": 1, "bulk": 2}
-ACTIVE = ("queued", "running")
 J = schema.jobs.c
 
 

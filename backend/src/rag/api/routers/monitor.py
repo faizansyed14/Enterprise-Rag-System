@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from rag.api.deps import AdminDep, ServicesDep, client_ip
 from rag.api.sse import sse_response
+from rag.cache import get_cache
 from rag.db.engine import transaction
 from rag.jobs import queue
 from rag.monitoring.alerts import open_alerts
@@ -104,7 +105,7 @@ async def summary(_: AdminDep, services: ServicesDep, minutes: int = 60) -> dict
                  "p50_ms": round(chat["p50"] or 0, 1), "p95_ms": round(chat["p95"] or 0, 1)},
         "cost": {"today_usd": round(float(cost_today), 4), "budget_usd": s.daily_budget_usd},
         "content": dict(content), "models": models, "roles": services.hub.describe(), **live,
-        "alerts": await open_alerts(),
+        "alerts": await open_alerts(), "cache": await get_cache(s).stats(),
         "failures": [{**dict(f), "finished_at": f["finished_at"].isoformat() if f["finished_at"] else None,
                       "last_error": (f["last_error"] or "")[:400]} for f in failures],
         "model_errors": [{**dict(e), "started_at": e["started_at"].isoformat()} for e in model_errors],

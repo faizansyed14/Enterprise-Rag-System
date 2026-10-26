@@ -129,6 +129,9 @@ class OpenAICompatChat:
             body["usage"] = {"include": True}
             if self.settings.openrouter_zdr:
                 body["provider"] = {"zdr": True, "data_collection": "deny"}
+            effort = self.spec.options.get("reasoning")  # openrouter/<model>?reasoning=low: less hidden thinking, more output
+            if effort in {"minimal", "low", "medium", "high"}:
+                body["reasoning"] = {"effort": effort}
         return body
 
     def _accepts_temperature(self) -> bool:

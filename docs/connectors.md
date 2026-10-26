@@ -107,8 +107,23 @@ Folder names tell the system the project and document type. See *Folder rules* i
 
 ## Supported formats
 
-PDF (text and scanned), Word, Excel, PowerPoint, Outlook `.eml`, and `.msg`, HTML, text and
-Markdown, CSV, images (OCR), and ZIP archives (members are ingested individually, with limits). Legacy `.doc`, `.xls`
-and `.ppt` need LibreOffice: build with `INSTALL_LIBREOFFICE=true`. CAD files (`.dwg`, `.rvt`) are stored but not
-indexed — export drawings to PDF. Encrypted, corrupt and unsupported files are skipped with the reason shown on the
-Documents page and in the Monitor page's failed-jobs table.
+The readers are dispatched by `ingestion/formats.py` `parse_document`, and the format is detected from the file's first
+bytes before its extension is considered.
+
+| Format | Reader |
+|---|---|
+| PDF (text and scanned) | the `PARSER` role (default `local/pdfium` page router with OCR, tables, drawing title blocks) |
+| Word `.docx`, Excel `.xlsx`/`.xlsm`, PowerPoint `.pptx`, CSV/TSV | native readers (no conversion) |
+| Outlook `.eml` and `.msg`, HTML, text, Markdown, JSON, XML, logs and other text files | native readers; e-mail attachments become child documents |
+| RTF, ODT, Primavera `.xer` | `ingestion/formats_extra.py` |
+| Legacy `.doc`, `.xls`, `.ppt`, `.ods`, `.odp` | converted with LibreOffice first: build with `INSTALL_LIBREOFFICE=true` |
+| Images (PNG, JPEG, TIFF, BMP, WebP, GIF) | the `OCR` role |
+| **AutoCAD `.dwg` and `.dxf`** | `ingestion/cad.py`: DWG is converted to DXF with LibreDWG's `dwg2dxf`. Each sheet (model space and every layout) becomes a page holding its text, dimensions, title-block attributes, layers and blocks. Each sheet is drawn to a PNG for the viewer and, when `VISION` is set, described by the vision model. |
+| ZIP | members are ingested individually (limits: 2,000 members, 4 GB, ratio 200). In the upload dialog a ZIP is unpacked first, nested ZIPs included, so files can be selected. |
+
+Revit `.rvt` is not read; it is stored only. Password-protected PDF, Office and ZIP files are detected
+(`ingestion/protection.py`), refused with the reason `Protected: …`, and shown with a lock icon. Corrupt and unsupported
+files are skipped with the reason shown on the Documents page and in the Monitor page's failed-jobs table.
+
+For connector sources (not for uploads), extensions listed in `SKIP_EXTENSIONS` (default `jpg,jpeg,png`) are recorded as
+skipped instead of being read. That saves OCR on photo folders.

@@ -49,11 +49,6 @@ def _completes_word(vocab: dict[str, float], left: str, candidate: str, right: s
     return stub not in vocab or vocab[stub] > vocab[joined]
 
 
-def protect(char: str) -> str:
-    """The placeholder for a control character (used by the text cleaner)."""
-    return chr(PLACEHOLDER_BASE + ord(char))
-
-
 def has_placeholders(text: str) -> bool:
     return _PLACEHOLDER.search(text) is not None
 

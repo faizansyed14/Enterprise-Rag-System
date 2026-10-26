@@ -69,7 +69,11 @@ def compute(analyzer: BM25Analyzer, query: str, identifiers: list[str], ranked: 
     terms = [t for t in dict.fromkeys(analyzer.tokens(query, query=True)) if not t.startswith("#")]
     sig.terms = len(terms)
     head_n = ranked[:top]
-    dense = [c.legs.get("dense", c.legs.get("exact")) for c in ranked[:40] if c.legs.get("dense") is not None or c.legs.get("exact") is not None]
+    dense = [
+        c.legs.get("dense", c.legs.get("exact"))
+        for c in ranked[:40]
+        if c.legs.get("dense") is not None or c.legs.get("exact") is not None
+    ]
     sig.dense = max(dense) if dense else None
     sparse = [c.legs["sparse"] for c in ranked[:40] if "sparse" in c.legs]
     if sparse:
@@ -78,14 +82,16 @@ def compute(analyzer: BM25Analyzer, query: str, identifiers: list[str], ranked: 
     if scored:
         sig.rerank = max(scored)
     if identifiers:
-        haystack = " ".join(" ".join(c.payload.get("identifiers") or []) + " " + str(c.payload.get("text", ""))[:3000]
-                            for c in head_n).casefold()
+        haystack = " ".join(
+            " ".join(c.payload.get("identifiers") or []) + " " + str(c.payload.get("text", ""))[:3000] for c in head_n
+        ).casefold()
         keys = [i.casefold() for i in identifiers]
         sig.identifier_found = any(k in haystack for k in keys)
     if terms:
         bodies = [set(analyzer.tokens(str(c.payload.get("text", "")))) for c in head_n]
-        heads = [set(analyzer.tokens(str(c.payload.get("header", "")) + " " + str(c.payload.get("file_name", ""))))
-                 for c in head_n]
+        heads = [
+            set(analyzer.tokens(str(c.payload.get("header", "")) + " " + str(c.payload.get("file_name", "")))) for c in head_n
+        ]
         weights = _idf_weights(terms, bodies)
         sig.coverage = max(coverage_of(terms, weights, b, h) for b, h in zip(bodies, heads, strict=True))
     return sig

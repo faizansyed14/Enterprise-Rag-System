@@ -73,8 +73,3 @@ def parse_title_block(text: str) -> dict[str, str]:
         if ids:
             fields["doc_number"] = ids[0].raw.upper()
     return fields
-
-
-def title_block_region(width: float, height: float) -> tuple[float, float, float, float]:
-    """Bottom-right region (x0, y0, x1, y1 in PDF points, origin bottom-left) where title blocks usually sit."""
-    return (width * 0.55, 0.0, width, height * 0.35)

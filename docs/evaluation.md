@@ -31,7 +31,7 @@ demo library.
 Put the file in the `data` volume:
 
 ```bash
-docker compose cp site-a.yaml api:/data/eval/site-a.yaml
+docker compose cp site-a.yaml backend:/data/eval/site-a.yaml
 scripts/eval.sh site-a
 ```
 

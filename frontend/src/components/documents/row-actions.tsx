@@ -1,38 +1,30 @@
 "use client";
 
-import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Cloud, Cpu, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { ProjectPicker } from "@/components/documents/upload-dialog";
 import { Button, IconButton } from "@/components/ui/button";
 import { Field } from "@/components/ui/fields";
-import { Dialog, Popover } from "@/components/ui/overlay";
+import { Dialog } from "@/components/ui/overlay";
 import { useToast } from "@/components/ui/toast";
 import { api, errorMessage } from "@/lib/api";
+import { useApi } from "@/lib/hooks";
 
-/** The three dots at the end of a row: change the project, or delete the file. */
-export function RowMenu({ title, onEdit, onDelete }: { title: string; onEdit: () => void; onDelete: () => void }) {
-  const [open, setOpen] = useState(false);
-  const item = "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] hover:bg-surface-hover";
+/** The actions at the end of a row, as icons: edit the project, read the file again, delete. */
+export function RowActions({ title, onEdit, onReprocess, onDelete }: { title: string; onEdit: () => void; onReprocess: () => void; onDelete: () => void }) {
   return (
-    <Popover
-      open={open}
-      onOpenChange={setOpen}
-      align="right"
-      className="w-44 p-1"
-      trigger={(props) => (
-        <IconButton label={`Actions for ${title}`} {...props}>
-          <MoreHorizontal size={16} />
-        </IconButton>
-      )}
-    >
-      <button type="button" className={item} onClick={() => { setOpen(false); onEdit(); }}>
-        <Pencil size={14} aria-hidden /> Edit project
-      </button>
-      <button type="button" className={`${item} text-danger`} onClick={() => { setOpen(false); onDelete(); }}>
-        <Trash2 size={14} aria-hidden /> Delete
-      </button>
-    </Popover>
+    <div className="flex items-center justify-end gap-0.5">
+      <IconButton label={`Edit project of ${title}`} onClick={onEdit}>
+        <Pencil size={15} />
+      </IconButton>
+      <IconButton label={`Reprocess ${title}`} onClick={onReprocess}>
+        <RefreshCw size={15} />
+      </IconButton>
+      <IconButton label={`Delete ${title}`} onClick={onDelete} className="hover:!text-danger">
+        <Trash2 size={15} />
+      </IconButton>
+    </div>
   );
 }
 
@@ -109,6 +101,74 @@ export function DeleteDialog({
       <p className="text-[13px] text-muted">
         The original file, its text, chunks and search entries are removed for good. This cannot be undone.
       </p>
+    </Dialog>
+  );
+}
+
+type Options = { local: { label: string }; vision: { available: boolean; model: string | null }; current: "local" | "vision" };
+
+/** Read a file again, choosing who does the OCR for this run only. */
+export function ReprocessDialog({ id, title, onClose, onQueued }: { id: string; title: string; onClose: () => void; onQueued: () => void }) {
+  const { data } = useApi<Options>("/documents/reprocess-options");
+  const [choice, setChoice] = useState<"local" | "vision" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const mode = choice ?? data?.current ?? "local";
+  const visionOk = Boolean(data?.vision.available);
+  const run = async () => {
+    setBusy(true);
+    try {
+      await api(`/documents/${id}/reprocess`, { body: { mode } });
+      toast("Reading the file again. Progress shows at the top of the page.");
+      onQueued();
+      onClose();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+      setBusy(false);
+    }
+  };
+  const option = (value: "local" | "vision", icon: React.ReactNode, name: string, text: string, disabled = false) => (
+    <label
+      className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 ${mode === value ? "border-foreground bg-surface-hover" : "border-border"} ${disabled ? "cursor-not-allowed opacity-50" : "hover:bg-surface-hover"}`}
+    >
+      <input type="radio" name="ocr" checked={mode === value} disabled={disabled} onChange={() => setChoice(value)} className="mt-1 accent-[var(--accent)]" />
+      <span className="min-w-0">
+        <span className="flex items-center gap-1.5 text-[13.5px] font-medium">
+          {icon} {name}
+        </span>
+        <span className="block text-[12.5px] text-muted">{text}</span>
+      </span>
+    </label>
+  );
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Reprocess this file"
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button variant="primary" onClick={run} disabled={busy || !data} icon={<RefreshCw size={14} aria-hidden />}>
+            {busy ? "Queuing…" : "Reprocess"}
+          </Button>
+        </>
+      }
+    >
+      <p className="truncate text-[13px] text-muted">{title}</p>
+      <p className="text-[13px]">The file is read again from the stored original, then split, embedded and published. It stays searchable meanwhile. Choose how scans and images are read this time:</p>
+      <div className="space-y-2">
+        {option("local", <Cpu size={14} aria-hidden />, "Local OCR", `${data?.local.label ?? "RapidOCR"}: everything stays on this server and costs nothing. Best for clean scans; weaker on photos, stamps and Arabic handwriting.`)}
+        {option(
+          "vision",
+          <Cloud size={14} aria-hidden />,
+          "LLM OCR (vision model)",
+          visionOk
+            ? `${data?.vision.model}: reads scans, photos and tables more accurately, and also describes images. Pages are sent to the model (those with bank or ID numbers stay local) and cost a little per page.`
+            : "No vision model is set. Choose one under Models, Drawing and image reading, to use this.",
+          !visionOk,
+        )}
+      </div>
+      {data ? <p className="text-[12px] text-muted">Your current default is {data.current === "vision" ? "LLM OCR" : "local OCR"}. This choice applies to this file only.</p> : null}
     </Dialog>
   );
 }

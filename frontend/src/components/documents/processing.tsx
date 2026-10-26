@@ -2,7 +2,9 @@
 
 import { Cloud, Cpu } from "lucide-react";
 
+import { ErrorNote, Spinner } from "@/components/ui/feedback";
 import { useApi } from "@/lib/hooks";
+import { ROLE_NAMES } from "@/lib/roles";
 
 type Call = {
   role: string;
@@ -34,13 +36,9 @@ type Processing = {
   cost_usd: number;
 };
 
-const ROLE_NAMES: Record<string, string> = {
-  VISION: "Vision (images, drawings)",
-  OCR: "OCR (scanned pages)",
-  LLM_ENRICH: "Metadata filling",
-  EMBEDDER: "Embeddings (search)",
-  PARSER: "PDF reader",
-};
+function roleLabel(role: string): string {
+  return ROLE_NAMES[role] ?? role;
+}
 
 function money(usd: number): string {
   if (!usd) return "free";
@@ -49,8 +47,9 @@ function money(usd: number): string {
 
 /** What read this file: the reader, OCR or vision per page, and every model call made for it. */
 export function ProcessingPanel({ documentId, versionId }: { documentId: string; versionId: string }) {
-  const { data } = useApi<Processing>(`/documents/${documentId}/processing?${new URLSearchParams({ version: versionId })}`);
-  if (!data) return <p className="text-[12.5px] text-muted">Loading…</p>;
+  const { data, error } = useApi<Processing>(`/documents/${documentId}/processing?${new URLSearchParams({ version: versionId })}`);
+  if (error) return <ErrorNote>{error}</ErrorNote>;
+  if (!data) return <Spinner label="Loading processing details" />;
   const cloud = data.calls.filter((c) => c.cloud);
   const showPages = data.pages.some((p) => p.method !== "native");
   return (
@@ -59,7 +58,7 @@ export function ProcessingPanel({ documentId, versionId }: { documentId: string;
         {data.cloud_used ? <Cloud size={14} className="mt-0.5 shrink-0" aria-hidden /> : <Cpu size={14} className="mt-0.5 shrink-0" aria-hidden />}
         <span>
           {data.cloud_used
-            ? `Cloud models were used for this file (${cloud.map((c) => ROLE_NAMES[c.role] ?? c.role).join(", ")}). Total ${money(data.cost_usd)}.`
+            ? `Cloud models were used for this file (${cloud.map((c) => roleLabel(c.role)).join(", ")}). Total ${money(data.cost_usd)}.`
             : "Read entirely on this server. No cloud model saw this file."}
         </span>
       </p>
@@ -98,7 +97,7 @@ export function ProcessingPanel({ documentId, versionId }: { documentId: string;
             {data.calls.map((c) => (
               <li key={`${c.role}-${c.model}`} className="px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium">{ROLE_NAMES[c.role] ?? c.role}</span>
+                  <span className="font-medium">{roleLabel(c.role)}</span>
                   <span className={c.cloud ? "text-warning" : "text-muted"}>{c.cloud ? "cloud" : "local"}</span>
                 </div>
                 <div className="break-all text-muted">

@@ -28,7 +28,18 @@ def _per_million(price: Any) -> float | None:
 
 # Catalogue entries that are not models to answer or read pages with: music, speech and safety classifiers, and routers that
 # pick a model for you (so the price and the privacy of a request cannot be known in advance).
-_NOT_FOR_READING = ("lyria", "content-safety", "guard", "embed", "tts", "whisper", "moderation", "openrouter/", "-router", "/auto")
+_NOT_FOR_READING = (
+    "lyria",
+    "content-safety",
+    "guard",
+    "embed",
+    "tts",
+    "whisper",
+    "moderation",
+    "openrouter/",
+    "-router",
+    "/auto",
+)
 
 
 def _entry(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -41,10 +52,15 @@ def _entry(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None  # image generators and the like cannot write an answer
     pricing = raw.get("pricing") or {}
     prompt, completion = _per_million(pricing.get("prompt")), _per_million(pricing.get("completion"))
-    return {"id": model_id, "name": str(raw.get("name") or model_id), "context": raw.get("context_length"),
-            "prompt_per_m": prompt, "completion_per_m": completion,
-            "free": prompt == 0 and completion == 0,
-            "vision": "image" in (architecture.get("input_modalities") or [])}
+    return {
+        "id": model_id,
+        "name": str(raw.get("name") or model_id),
+        "context": raw.get("context_length"),
+        "prompt_per_m": prompt,
+        "completion_per_m": completion,
+        "free": prompt == 0 and completion == 0,
+        "vision": "image" in (architecture.get("input_modalities") or []),
+    }
 
 
 def parse(payload: dict[str, Any]) -> list[dict[str, Any]]:

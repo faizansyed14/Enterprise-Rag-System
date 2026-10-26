@@ -82,6 +82,11 @@ function Detail() {
   const page = Math.max(1, Number(params.get("page") || 1) || 1);
   const quote = params.get("q") || undefined;
   const version = doc?.versions.find((v) => v.id === versionId) ?? doc?.versions[0];
+  const from = params.get("from");
+  const folder =
+    from === "__all__" ? "" : from || doc?.project_ids[0] || "__none__";
+  const libraryHref = folder ? `/documents?project=${encodeURIComponent(folder)}` : "/documents?all=1";
+  const libraryLabel = !folder ? "All files" : folder === "__none__" ? "No project" : folder;
 
   useEffect(() => {
     if (doc) document.title = doc.doc_number || doc.title;
@@ -93,6 +98,7 @@ function Detail() {
     if (v) q.set("version", v);
     q.set("page", String(next.page ?? page));
     if (next.keepQuote && quote) q.set("q", quote);
+    if (from) q.set("from", from);
     router.replace(`${pathname}?${q}`, { scroll: false });
   };
 
@@ -102,7 +108,7 @@ function Detail() {
     setDeleteError("");
     try {
       await api(`/documents/${doc.id}`, { method: "DELETE" });
-      router.push("/documents");
+      router.push(libraryHref);
     } catch (err) {
       setDeleteError(errorMessage(err));
       setDeleting(false);
@@ -133,9 +139,9 @@ function Detail() {
     <div className="flex h-full min-h-0 flex-col">
       <header className="shrink-0 border-b border-border px-4 py-3 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <Link href="/documents" className="inline-flex items-center gap-1.5 text-[12.5px] text-muted hover:text-foreground">
+          <Link href={libraryHref} className="inline-flex items-center gap-1.5 text-[12.5px] text-muted hover:text-foreground">
             <ArrowLeft size={14} aria-hidden />
-            Documents
+            {libraryLabel}
           </Link>
           <span className="hidden text-border-strong sm:inline" aria-hidden>
             /

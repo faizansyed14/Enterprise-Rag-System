@@ -92,7 +92,7 @@ principals. Qdrant payloads are a performance copy; Postgres is the authority. T
 permission change and the payload update that follows it.
 
 **8. Evidence.** The best `EVIDENCE_PASSAGES` passages are chosen, at most `EVIDENCE_PER_DOCUMENT` per document, each
-expanded with neighbouring text from the same page so tables and clauses are not cut in half. Each passage carries the
+expanded with its previous and next chunk when that neighbour is on the same page, under the same heading and shorter than 200 tokens, so tables and clauses are not cut in half. Demoted near-copies are skipped, and a candidate below `MIN_EVIDENCE_SCORE` ends the list. Each passage carries the
 document, page and the project it belongs to.
 
 ## Answers and citations
@@ -105,7 +105,28 @@ The answer model sees numbered passages and must cite them. Afterwards the syste
 3. verifies the quoted words occur on the page,
 4. checks groundedness of each sentence against its cited passages,
 5. marks sentences it could not support, and
-6. replaces the answer with a "not found in the library" response when the evidence does not contain the answer.
+6. sets the answer's status:
+   - `not_found`: there was no evidence at all (the relevance gate turned the question away, or no passage survived).
+     The answer model is then not called.
+   - `unverified`: there were citations, but none verified and groundedness was below 0.5. A note is appended.
+   - `ok`: otherwise. Only `ok` answers are cached.
+
+**The relevance gate.** This is `retrieval/relevance.py`. A question is turned away only when **every** enabled signal is
+weak: best dense cosine, best BM25 score per term, coverage of the question's words, and the cross-encoder's best
+probability. By default only the rerank signal is on (`MIN_RERANK=0.02`, English questions only); `MIN_DENSE`,
+`MIN_SPARSE` and `MIN_COVERAGE` are 0. Calibrate them with `eval/gate_calibrate.py` on your own unanswerable questions.
+
+**Live Details panel.** Every answer has an info button. It shows each step as it happened:
+
+- the plan;
+- the query embedding;
+- every search, with each candidate's leg scores and its rerank and final score;
+- the files read, and the strategy;
+- every model call, with the exact (masked) messages and the reply;
+- the evidence check, the arithmetic and the citation checks.
+
+The panel is fed by `monitoring/inspector.py` through SSE `trace` events. It is not stored. `CHAT_DETAILS` controls who
+sees it: `all`, or `admin`.
 
 In the chat each source is the file name and page; clicking it (or its `[1]` marker in the answer) opens the original file in a new tab at that page, exactly as uploaded (`/api/v1/documents/<id>/file#page=N`; Office files, which a browser cannot show, download instead). Access is checked on every open.
 
@@ -157,3 +178,19 @@ best weights back toward dense. The demo golden set contains such paraphrases an
 on your own questions ([evaluation.md](evaluation.md)) and override with `FUSION_WEIGHTS`. The comparison also showed
 that naming the project in the question, or filtering on it, removes most of the difficulty (97% at hit@1 for every
 weight set), as the outside test found.
+
+## How a question is answered: strategies
+
+After the first search, a small model call (the default answer model) looks at the question and the documents found, and picks
+how to gather the evidence (`rag/answering/strategy.py`; rules decide when no model is available):
+
+| Strategy | When | What happens |
+|---|---|---|
+| lookup | one fact or a short answer | the search's passages; when the question names a file, that file is read too (its beginning plus the parts that match) |
+| read_files | the answer needs all of one or several specific documents (every row, a total over a sheet, a whole contract, a comparison of named files) | up to `READ_FILES_MAX_DOCS` (40) documents are read in full within `READ_FILES_BUDGET_CHARS` (400,000). The budget is shared fairly: small files are read whole, and large ones split what is left (`strategy.fair_shares`). For a file that did not fit, its search passages are added, along with up to six of the search's best passages from other files. When the answer model runs on the local server, the limit drops to 3 documents and 60,000 characters. |
+| list_all | items spread over many documents (all licences, every invoice from X, which documents mention Y) | up to `AGGREGATE_MAX_DOCS` documents are read and the relevant pages kept (map), then the answer is written from them (reduce) |
+| multi_part | several different things, or a comparison | the question is split and each part searched on its own |
+
+Before the answer is written, a second small call checks that the evidence covers every part of the question; when it does not,
+the missing part is searched for and many documents are read for it (`SUFFICIENCY_CHECK`). Totals the model writes out but
+does not work out are calculated exactly by the program (`rag/answering/arithmetic.py`).

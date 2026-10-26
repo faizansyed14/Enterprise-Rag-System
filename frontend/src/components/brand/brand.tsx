@@ -161,6 +161,25 @@ export function modelLabel(provider: string | null | undefined, model: string | 
   return shortModel(`${provider}/${model ?? ""}`);
 }
 
+export type CatalogModelEntry = { id: string; name: string };
+
+/** Prefer catalogue display name; fall back to modelLabel. Secondary line keeps the opaque id. */
+export function resolveModelDisplay(
+  spec: string | null | undefined,
+  catalog?: CatalogModelEntry[] | null,
+): { title: string; detail: string } {
+  if (!spec) return { title: "Automatic", detail: "Configured answer model" };
+  const { provider, model } = splitSpec(spec);
+  if (OFFLINE.has(provider)) {
+    return { title: providerName(provider), detail: "Runs on this server" };
+  }
+  const id = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+  const named = catalog?.find((m) => m.id === model || m.id === id || spec.endsWith(`/${m.id}`));
+  const title = named?.name || modelLabel(provider, model);
+  const detail = `${providerName(provider)}${model ? ` · ${model}` : ""}`;
+  return { title, detail };
+}
+
 /** Typographic wordmark in the display face. */
 export function Wordmark({ name, compact = false }: { name: string; compact?: boolean }) {
   return (

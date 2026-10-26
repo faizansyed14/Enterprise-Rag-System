@@ -23,7 +23,9 @@ from typing import Any
 from qdrant_client import models
 from sqlalchemy import text
 
+from rag.cache import digest, get_cache
 from rag.db.engine import transaction
+from rag.monitoring import inspector
 from rag.providers.vectorstore.qdrant import DENSE, SPARSE, match_any, match_value
 from rag.retrieval import relevance
 from rag.retrieval.types import Candidate, DocumentHit, Passage, QueryPlan, RetrievalResult, SearchFilters
@@ -141,8 +143,9 @@ class Retriever:
         ranked = self._phrase_boost(plan, ranked)
 
         t = time.perf_counter()
+        rerank_info: dict[str, Any] = {}
         if rerank:
-            ranked = await self._rerank(plan, ranked)
+            ranked = await self._rerank(plan, ranked, rerank_info)
         else:
             for c in ranked:
                 c.final = c.fused
@@ -158,9 +161,7 @@ class Retriever:
         allowed = await self._recheck(ranked[: max(s.candidate_docs * 4, 60)], principals, plan.filters)
         ranked = [c for c in ranked if c.version_id in allowed]
         documents = self._documents(ranked)
-        restricted = 0
-        if plan.filters.exclude_local_only:
-            restricted = 0
+        restricted = 0  # local-only documents hidden from a cloud model: not counted yet (see docs/recommendations.md)
         sig = relevance.compute(self.services.analyzer, plan.query, plan.identifiers, ranked)
         # The cross-encoder's probability was calibrated on English questions; other scripts may score lower for the same
         # relevance, so until measured they are never turned away on it.
@@ -177,6 +178,9 @@ class Retriever:
 
         result = RetrievalResult(plan=plan, passages=passages_out, documents=documents, timings_ms=timings,
                                  restricted_local_only=restricted, signals=sig.as_dict(), off_topic=off_topic)
+        if inspector.current() is not None:
+            inspector.note("search", f"Searched: {plan.query[:90]}", ms=timings["total"], **self._details(
+                plan, legs, results, ranked, result, visible=visible, exact_scan=exact_scan, rerank=rerank_info))
         if debug:
             result.debug = {
                 "collection": build.collection, "visible_chunks": visible, "exact_scan": exact_scan, "legs": {
@@ -193,6 +197,47 @@ class Retriever:
                 "filter": flt.model_dump(exclude_none=True),
             }
         return result
+
+    def _details(self, plan: QueryPlan, legs: list[str], results: list[Any], ranked: list[Candidate],
+                 result: RetrievalResult, **extra: Any) -> dict[str, Any]:
+        """One search as the chat's Details panel shows it: each leg's hits, the candidates with every score, the passages."""
+        s = self.settings
+        return {
+            "query": plan.query,
+            "english": plan.english,
+            "identifiers": plan.identifiers,
+            "filters": plan.filters.as_dict(),
+            "legs": {leg: len(hits) for leg, hits in zip(legs, results, strict=True)},
+            "limits": {"dense": s.dense_top_k, "sparse": s.sparse_top_k, "exact": s.exact_top_k,
+                       "rerank_top_n": s.rerank_top_n, "passages": len(result.passages)},
+            "candidates": [
+                {
+                    "rank": i,
+                    "file": c.payload.get("file_name") or c.payload.get("title", ""),
+                    "page": c.payload.get("page_start"),
+                    "chunk": c.payload.get("chunk_no"),
+                    "legs": {k: round(v, 4) for k, v in c.legs.items()},
+                    "fused": round(c.fused, 4),
+                    "phrase": round(c.phrase, 3),
+                    "rerank": None if c.rerank is None else round(c.rerank, 4),
+                    "final": round(c.final, 4),
+                    "demoted": c.demoted,
+                    "named": bool(c.payload.get("_named")),
+                    "text": inspector.clip(c.payload.get("text", ""), 1500),
+                }
+                for i, c in enumerate(ranked[:30], start=1)
+            ],
+            "passages": [
+                {"n": p.n, "file": p.file_name or p.title, "pages": [p.page_start, p.page_end], "score": p.score,
+                 "chars": len(p.text), "text": inspector.clip(p.text, 6000)}
+                for p in result.passages
+            ],
+            "documents": [{"file": d.file_name or d.title, "score": d.score, "pages": d.pages} for d in result.documents],
+            "signals": result.signals,
+            "off_topic": result.off_topic,
+            "timings_ms": {k: round(v, 1) for k, v in result.timings_ms.items()},
+            **extra,
+        }
 
     # ---- fusion -----------------------------------------------------------------------------------------------------
     def _fuse(self, plan: QueryPlan, candidates: dict[str, Candidate], legs: list[str]) -> None:
@@ -247,7 +292,8 @@ class Retriever:
             rows = (await conn.execute(text(
                 "SELECT version_id::text, chunk_no, header, text FROM chunks WHERE (version_id, chunk_no) IN "
                 "(SELECT * FROM unnest(CAST(:v AS uuid[]), CAST(:n AS int[])))"),
-                {"v": [c.payload.get("version_id") for c in missing], "n": [int(c.payload.get("chunk_no", 0)) for c in missing]})).all()
+                {"v": [c.payload.get("version_id") for c in missing],
+                 "n": [int(c.payload.get("chunk_no", 0)) for c in missing]})).all()
         found = {(r[0], r[1]): (r[2], r[3]) for r in rows}
         for cand in missing:
             header, body = found.get((cand.payload.get("version_id"), int(cand.payload.get("chunk_no", 0))), ("", ""))
@@ -262,14 +308,19 @@ class Retriever:
         words = _WORDS.findall(plan.query.lower())
         if boost <= 0 or not words:
             return ranked
-        asked = {tuple(words[i:i + n]) for n in (1, 2, 3, 4) for i in range(len(words) - n + 1)}
+        asked = {tuple(words[i : i + n]) for n in (1, 2, 3, 4) for i in range(len(words) - n + 1)}
         names: dict[str, bool] = {}
         hit = False
         for cand in ranked:
             name = str(cand.payload.get("file_name", ""))
             if name not in names:
                 stem = _WORDS.findall(name.rsplit(".", 1)[0].lower())
-                names[name] = bool(stem) and tuple(stem) in asked and (len(stem) > 1 or len(stem[0]) >= 6)                     and not all(w in STOP_EN for w in stem)
+                names[name] = (
+                    bool(stem)
+                    and tuple(stem) in asked
+                    and (len(stem) > 1 or len(stem[0]) >= 6)
+                    and not all(w in STOP_EN for w in stem)
+                )
             if names[name]:
                 cand.fused += boost
                 cand.payload["_named"] = True
@@ -318,7 +369,8 @@ class Retriever:
         quoted = min(1.0, max((c.phrase for c in top[:5]), default=0.0))
         return floor + (ceiling - floor) * (1.0 - quoted) ** max(0.1, s.rerank_adapt_power)
 
-    async def _rerank_scores(self, reranker: Any, query: str, cands: list[Candidate]) -> list[float]:
+    async def _rerank_scores(self, reranker: Any, query: str, cands: list[Candidate],
+                             info: dict[str, Any] | None = None) -> list[float]:
         """Cross-encoder scores, taking repeats (same question, same chunk text) from a cache: the score of a pair never
         changes, and the same question is asked again and again."""
         label = getattr(getattr(reranker, "spec", None), "label", "reranker")
@@ -327,24 +379,45 @@ class Retriever:
         keys = [(label, query, c.payload.get("content_hash") or c.id) for c in cands]
         out: list[float | None] = [cache.get(k) for k in keys]
         todo = [i for i, v in enumerate(out) if v is None]
+        in_memory = len(cands) - len(todo)
+        shared = get_cache(self.settings)
+        qd = digest(query)
+        shared_keys = [f"rr:{label}:{qd}:{k[2]}" for k in keys]
+        if todo and shared.enabled:  # the other API processes (and earlier runs) may already have scored these pairs
+            found = await shared.mget_floats([shared_keys[i] for i in todo])
+            for i, score in zip(todo, found, strict=True):
+                if score is not None:
+                    out[i] = score
+                    if limit:
+                        cache[keys[i]] = score
+            await shared.stat("rerank_hit", sum(1 for s in found if s is not None))
+            await shared.stat("rerank_miss", sum(1 for s in found if s is None))
+            todo = [i for i, v in enumerate(out) if v is None]
+        if info is not None:
+            info.update(model=label, pairs=len(cands), from_memory=in_memory,
+                        from_shared_cache=len(cands) - in_memory - len(todo), scored_now=len(todo))
         if todo:
             texts = [f"{cands[i].payload.get('header', '')}\n{cands[i].payload.get('text', '')}"[:2000] for i in todo]
             for i, score in zip(todo, await reranker.rerank(query, texts), strict=True):
                 out[i] = float(score)
                 if limit:
                     cache[keys[i]] = out[i]
+            if shared.enabled:
+                await shared.mset_floats({shared_keys[i]: float(out[i]) for i in todo}, self.settings.cache_rerank_ttl_s)  # type: ignore[arg-type]
         while limit and len(cache) > limit:
             cache.popitem(last=False)
         return [float(v) for v in out]  # type: ignore[arg-type]
 
-    async def _rerank(self, plan: QueryPlan, ranked: list[Candidate]) -> list[Candidate]:
+    async def _rerank(self, plan: QueryPlan, ranked: list[Candidate], info: dict[str, Any] | None = None) -> list[Candidate]:
         for c in ranked:
             c.final = c.fused
+        info = {} if info is None else info
         reranker = self.services.hub.reranker()
         if reranker is None or not ranked or not self._rerank_wanted(plan):
+            info["skipped"] = "no reranker" if reranker is None else "short or identifier question: fused order kept"
             return ranked
         top = ranked[: self.settings.rerank_top_n]
-        rest = ranked[self.settings.rerank_top_n:]
+        rest = ranked[self.settings.rerank_top_n :]
         languages = getattr(reranker, "languages", None)
         query = plan.query
         if not languages_compatible(plan.language, languages):
@@ -356,15 +429,17 @@ class Retriever:
         if len(eligible) < 2:
             return ranked
         try:
-            scores = await self._rerank_scores(reranker, query, eligible)
+            scores = await self._rerank_scores(reranker, query, eligible, info)
         except Exception:
             log.warning("reranker failed; using fused scores", exc_info=True)
+            info["skipped"] = "reranker failed: fused order kept"
             return ranked
         for cand, score in zip(eligible, scores, strict=True):
             cand.rerank = float(score)
         fused_scaled = _minmax({c.id: c.fused for c in top})
         rerank_scaled = _minmax({c.id: c.rerank for c in eligible if c.rerank is not None})
         blend = self._blend(top)
+        info["blend"] = round(blend, 3)  # the cross-encoder's share of the final score
         for cand in top:
             if cand.rerank is not None:
                 cand.final = blend * rerank_scaled[cand.id] + (1 - blend) * fused_scaled[cand.id]
@@ -406,7 +481,7 @@ class Retriever:
         sql = (
             "SELECT v.id::text FROM versions v WHERE v.id = ANY(CAST(:ids AS uuid[])) AND v.state = 'live' "  # noqa: S608 - fixed fragments, bound values
             + "AND EXISTS (SELECT 1 FROM version_access a WHERE a.version_id = v.id "
-              "AND a.principal = ANY(CAST(:p AS text[])))"
+            "AND a.principal = ANY(CAST(:p AS text[])))"
         )
         async with transaction() as conn:
             rows = (await conn.execute(text(sql), {"ids": version_ids, "p": principals})).all()
@@ -425,12 +500,19 @@ class Retriever:
             cands.sort(key=lambda c: c.final, reverse=True)
             p = cands[0].payload
             score = cands[0].final + (0.15 * cands[1].final if len(cands) > 1 else 0.0)
-            docs.append(DocumentHit(
-                document_id=p.get("document_id", ""), version_id=version_id, score=round(score, 4),
-                doc_number=p.get("doc_number", ""), title=p.get("title", ""),
-                file_name=p.get("file_name", ""),
-                project=(p.get("project_ids") or [""])[0], doc_type=p.get("doc_type", ""),
-                pages=sorted({c.payload.get("page_start", 0) for c in cands})[:10]))
+            docs.append(
+                DocumentHit(
+                    document_id=p.get("document_id", ""),
+                    version_id=version_id,
+                    score=round(score, 4),
+                    doc_number=p.get("doc_number", ""),
+                    title=p.get("title", ""),
+                    file_name=p.get("file_name", ""),
+                    project=(p.get("project_ids") or [""])[0],
+                    doc_type=p.get("doc_type", ""),
+                    pages=sorted({c.payload.get("page_start", 0) for c in cands})[:10],
+                )
+            )
         docs.sort(key=lambda d: d.score, reverse=True)
         return docs[: self.settings.candidate_docs]
 
@@ -463,11 +545,15 @@ class Retriever:
         keys = [(c.version_id, int(c.payload.get("chunk_no", 0))) for c in chosen]
         neighbours: dict[tuple[str, int], tuple[str, int, int, str]] = {}
         async with transaction() as conn:
-            rows = (await conn.execute(text(
-                "SELECT version_id::text, chunk_no, text, page_start, token_count, section_path FROM chunks "
-                "WHERE (version_id, chunk_no) IN (SELECT * FROM unnest(CAST(:v AS uuid[]), CAST(:n AS int[])))"),
-                {"v": [k[0] for k in keys for _ in (0, 1)],
-                 "n": [k[1] + d for k in keys for d in (-1, 1)]})).all()
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT version_id::text, chunk_no, text, page_start, token_count, section_path FROM chunks "
+                        "WHERE (version_id, chunk_no) IN (SELECT * FROM unnest(CAST(:v AS uuid[]), CAST(:n AS int[])))"
+                    ),
+                    {"v": [k[0] for k in keys for _ in (0, 1)], "n": [k[1] + d for k in keys for d in (-1, 1)]},
+                )
+            ).all()
         for r in rows:
             neighbours[(r[0], r[1])] = (r[2], r[3], r[4], r[5])
         passages: list[Passage] = []
@@ -485,12 +571,26 @@ class Retriever:
             parts.append(core)
             if after and after[1] == page and after[2] < 200 and after[3] == section:
                 parts.append(after[0])
-            passages.append(Passage(
-                n=i, chunk_id=cand.id, version_id=cand.version_id, document_id=cand.document_id,
-                doc_number=p.get("doc_number", ""), title=p.get("title", ""),
-                page_start=page, page_end=int(p.get("page_end", page)),
-                section_path=p.get("section_path", ""), kind=p.get("kind", "text"), text="\n".join(parts),
-                core_text=core, score=round(cand.final, 4), language=p.get("language", "und"),
-                file_name=p.get("file_name", ""), project=(p.get("project_ids") or [""])[0],
-                doc_type=p.get("doc_type", ""), local_only=bool(p.get("local_only"))))
+            passages.append(
+                Passage(
+                    n=i,
+                    chunk_id=cand.id,
+                    version_id=cand.version_id,
+                    document_id=cand.document_id,
+                    doc_number=p.get("doc_number", ""),
+                    title=p.get("title", ""),
+                    page_start=page,
+                    page_end=int(p.get("page_end", page)),
+                    section_path=p.get("section_path", ""),
+                    kind=p.get("kind", "text"),
+                    text="\n".join(parts),
+                    core_text=core,
+                    score=round(cand.final, 4),
+                    language=p.get("language", "und"),
+                    file_name=p.get("file_name", ""),
+                    project=(p.get("project_ids") or [""])[0],
+                    doc_type=p.get("doc_type", ""),
+                    local_only=bool(p.get("local_only")),
+                )
+            )
         return passages

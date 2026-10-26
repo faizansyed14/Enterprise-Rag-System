@@ -18,7 +18,7 @@ async def main(questions: list[str]) -> None:
 
     load_handlers()
     services = Services.create(get_settings())
-    principals = await principals_of(os.environ.get("BENCH_AS", "admin@example.com"))
+    principals = await principals_of(os.environ.get("BENCH_AS") or os.environ["BOOTSTRAP_ADMIN_EMAIL"])
     retriever = Retriever(services)
     router = QueryRouter(known_projects=await services.known_projects())
     for q in questions:

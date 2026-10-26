@@ -116,4 +116,15 @@ async def run_checks(services: Any) -> list[CheckResult]:
         if s.openrouter_api_key and not s.openrouter_zdr:
             results.append(CheckResult("privacy", "warn", "OPENROUTER_ZDR=false: prompts may reach providers that "
                                                           "retain data"))
+    from rag.cache import get_cache
+
+    cache = get_cache(s)
+    if not cache.enabled:
+        results.append(CheckResult("redis", "ok", "not configured: caches stay per process and rate limits stay in Postgres"))
+    else:
+        info = await cache.stats()
+        if info.get("available"):
+            results.append(CheckResult("redis", "ok", f"connected, {info['keys']} keys, {info['memory']} used"))
+        else:
+            results.append(CheckResult("redis", "warn", "configured but not reachable: the in-process fallbacks are used"))
     return results

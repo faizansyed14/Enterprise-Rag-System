@@ -118,6 +118,9 @@ def _plan(question: str, identifiers: list[str] | None = None, kind: str = "ques
 
 
 def test_reranker_blends_with_retrieval_and_remembers_scores() -> None:
+    from rag.cache import Cache, set_cache
+
+    set_cache(Cache(""))  # no shared Redis here: the per-process memory is what is tested
     fake = _FakeReranker()
     retriever = _retriever()
     retriever.services.hub = SimpleNamespace(reranker=lambda: fake)

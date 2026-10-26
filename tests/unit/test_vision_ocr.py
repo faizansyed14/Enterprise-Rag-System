@@ -39,7 +39,8 @@ class _Hub:
     def __init__(self, vision, local_text: str = "local words", privacy: bool = True) -> None:
         self._vision = vision
         self._local = _Local(local_text)
-        self.settings = SimpleNamespace(privacy_mask_for_models=privacy, privacy_kind_list=("iban", "account", "card"))
+        self.settings = SimpleNamespace(privacy_mask_for_models=privacy, privacy_kind_list=("iban", "account", "card"),
+                                        vision_concurrency=3, vision_retries=1)
 
     def spec(self, role):
         return SimpleNamespace(label="vision/default", is_off=False)

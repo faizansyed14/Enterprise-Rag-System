@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 
 from rapidfuzz import fuzz
 
+from rag.answering.arithmetic import derived
 from rag.providers.groundedness.judges import numbers_in
 from rag.retrieval.types import Passage
 
@@ -104,6 +105,8 @@ def verify(answer: str, passages: list[Passage]) -> list[Citation]:
         quotes: list[tuple[str, float]] = [best_span(s, passage.text) for s in sentences]
         quote, score = max(quotes, key=lambda q: q[1])
         missing = sorted({num for s in sentences for num in numbers_in(s)} - source_numbers - {str(n)})
+        # a total or difference worked out from the passage's own numbers is supported, though the passage never writes it
+        missing = [m for m in missing if not any(m in numbers_in(s) and derived(m, sorted(numbers_in(s))) for s in sentences)]
         verified = score >= VERIFY_THRESHOLD and not missing
         citations.append(Citation(n=n, passage=passage, quote=quote[:600], score=score, verified=verified,
                                   sentences=sentences, missing_numbers=missing))

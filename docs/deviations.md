@@ -35,19 +35,27 @@ Sources for the LiteLLM incident: [Arthur](https://www.arthur.ai/column/litellm-
 
 Read this list before relying on the system.
 
-1. **Docker images were not built or run.** The build environment had no reachable Docker daemon or registry. The
-   Dockerfiles, compose files and scripts were validated by static checks and by running the same steps by hand (the
-   backend and web app were run from source against real Postgres and Qdrant). Expect to fix small things on the first
-   `scripts/start.sh`; the logs (`scripts/logs.sh`) will say what.
-2. **No call to a paid API was made.** OpenRouter, Anthropic, OpenAI, Azure and Cohere adapters are covered by contract
-   tests against recorded or simulated responses. The demo used the offline extractive answerer. Run
+1. **Images built and running (updated 2026-10-23).** The Docker images (backend with LibreDWG, frontend, model server)
+   have been built, and the development stack (`docker-compose.yml` plus `docker-compose.dev.yml`) runs with real local
+   models (`multilingual-e5-small`, `mmarco-mMiniLMv2-L12`). The production compose file with production memory sizes
+   has not been run on production hardware.
+2. **Paid APIs: OpenRouter only.** The development stack answers through OpenRouter (Claude Haiku / Sonnet), with vision
+   through OpenRouter (Gemini Flash Lite with a Claude Haiku fallback) when switched on. Anthropic direct, OpenAI, Azure
+   and Cohere are still covered only by contract tests against recorded or simulated responses. Run
    `rag models test LLM_ANSWER` with your key first.
 3. **Microsoft 365 connectors were not run against a tenant.** Graph delta, permission mapping and site-group parsing are
    covered by contract tests built from documented response shapes; SharePoint REST group sync requires certificate
    credentials ([connectors.md](connectors.md)).
-4. **The default multilingual embedder was not run end to end.** `multilingual-e5-small` could not be downloaded in the
-   sandbox; the English `all-MiniLM-L6-v2` was used for the measured results. The code path is the same (the model
-   server loads either), but Arabic retrieval quality with e5 or bge-m3 needs your own evaluation.
+4. **The default multilingual embedder now runs end to end** (`multilingual-e5-small` with the `mmarco` reranker, measured on
+   the 407-question evaluation set in [retrieval.md](retrieval.md)). Arabic retrieval quality still needs a golden set of
+   real Arabic questions, and stronger models (bge-m3, bge-reranker-v2-m3) have not been compared
+   ([recommendations.md](recommendations.md#32-embeddings-and-reranking-local-no-paid-api)).
+4b. **AutoCAD support** (`ingestion/cad.py`, LibreDWG 0.14) is covered by unit tests on generated DXF drawings (`tests/unit/test_cad.py`) and was tried on real DWG
+   files. Known limits:
+   - a paper-space viewport is drawn empty;
+   - hatches are drawn as outlines;
+   - external references (xrefs) are not loaded;
+   - LibreDWG is GPLv3 (see [recommendations.md §4](recommendations.md#4-security-findings-still-open)).
 5. **Nothing was run at scale.** The largest library processed is the 16-document demo set. The 5 TB sizing is
    estimated ([scaling.md](scaling.md)); a 5% pilot should come first.
 6. **No external security review.** The checks in [security.md](security.md) are the builder's. Commission a penetration

@@ -37,8 +37,12 @@ function Marker({ display, citation, onOpen }: MarkerProps) {
         onClick={() => citation && onOpen?.(citation)}
         onFocus={() => setHover(true)}
         onBlur={() => setHover(false)}
-        aria-label={citation ? `Source ${display}: ${citation.doc_number || citation.title}, page ${citation.page}` : `Source ${display}`}
-        className="mx-[1px] inline-flex h-[17px] min-w-[17px] items-center justify-center rounded-[4px] border border-border-strong px-[3px] align-[1px] text-[10.5px] font-semibold leading-none tabular text-muted transition-colors enabled:hover:border-foreground enabled:hover:text-foreground disabled:cursor-default"
+        aria-label={
+          citation
+            ? `Source ${display}: ${citation.doc_number || citation.file_name || citation.title}, page ${citation.page}${citation.verified ? ", verified quote" : ", quote not verified"}`
+            : `Source ${display}`
+        }
+        className="mx-[1px] inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[4px] border border-border-strong bg-surface-raised px-[4px] align-[2px] text-[11px] font-semibold leading-none tabular text-foreground/80 underline-offset-2 transition-colors duration-150 enabled:hover:border-foreground enabled:hover:bg-surface-hover enabled:hover:text-foreground enabled:focus-visible:border-foreground disabled:cursor-default disabled:opacity-70"
       >
         {display}
       </button>
@@ -48,10 +52,18 @@ function Marker({ display, citation, onOpen }: MarkerProps) {
           className="absolute bottom-[calc(100%+6px)] left-1/2 z-20 w-[300px] -translate-x-1/2 rounded-xl border border-border bg-background p-3 text-left shadow-panel"
         >
           <span className="flex items-center gap-2 text-[12px]">
-            <span className="truncate font-semibold">{citation.doc_number || citation.file_name || citation.title}</span>
-            <span className="shrink-0 text-muted">p. {citation.page}</span>
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-border text-[11px] font-semibold tabular">
+              {display}
+            </span>
+            <span className="min-w-0 truncate font-semibold">{citation.doc_number || citation.file_name || citation.title}</span>
+            <span className="shrink-0 text-muted tabular">p. {citation.page}</span>
           </span>
-          {citation.quote ? <span className="source-text mt-1.5 line-clamp-4 block text-[14.5px] leading-snug text-foreground/90">{citation.quote}</span> : null}
+          <span className="mt-1.5 block text-[11.5px] text-muted">
+            {citation.verified ? "Verified on the cited page" : "Quote not matched on the cited page"}
+          </span>
+          {citation.quote ? (
+            <span className="source-text mt-1.5 line-clamp-4 block text-[14.5px] leading-snug text-foreground/90">{citation.quote}</span>
+          ) : null}
         </span>
       ) : null}
     </span>
@@ -170,7 +182,7 @@ export function AnswerText({
   const ctx: InlineContext = { order: citationOrder(text), byN: new Map(citations.map((c) => [c.n, c])), onOpen };
   const parsed = blocks(text);
   return (
-    <div dir="auto" className="space-y-3 text-[15px] leading-[1.7]">
+    <div dir="auto" className="answer-prose">
       {parsed.map((block, index) => {
         const key = `b${index}`;
         const last = index === parsed.length - 1;
@@ -178,7 +190,7 @@ export function AnswerText({
         switch (block.kind) {
           case "h":
             return (
-              <h3 key={key} className="pt-1 text-[15px] font-semibold">
+              <h3 key={key} className={caret}>
                 {inline(block.text, ctx, key)}
               </h3>
             );
@@ -186,7 +198,7 @@ export function AnswerText({
           case "ol": {
             const List = block.kind === "ul" ? "ul" : "ol";
             return (
-              <List key={key} className={block.kind === "ul" ? "list-disc space-y-1 pl-5 marker:text-muted" : "list-decimal space-y-1 pl-5 marker:text-muted"}>
+              <List key={key} className={block.kind === "ul" ? "list-disc marker:text-muted" : "list-decimal marker:text-muted"}>
                 {block.items.map((item, j) => (
                   <li key={`${key}-${j}`} className={caret && j === block.items.length - 1 ? caret : undefined}>
                     {inline(item, ctx, `${key}-${j}`)}
@@ -197,14 +209,12 @@ export function AnswerText({
           }
           case "table":
             return (
-              <div key={key} className="overflow-x-auto rounded-xl border border-border">
-                <table className="w-full border-collapse text-[13.5px]">
+              <div key={key} className="my-3 overflow-x-auto rounded-lg border border-border">
+                <table>
                   <thead>
                     <tr>
                       {block.header.map((h, j) => (
-                        <th key={j} className="border-b border-border bg-surface px-3 py-1.5 text-left font-medium">
-                          {inline(h, ctx, `${key}-h${j}`)}
-                        </th>
+                        <th key={j}>{inline(h, ctx, `${key}-h${j}`)}</th>
                       ))}
                     </tr>
                   </thead>
@@ -212,9 +222,7 @@ export function AnswerText({
                     {block.rows.map((row, r) => (
                       <tr key={r}>
                         {row.map((cell, j) => (
-                          <td key={j} className="border-b border-border/70 px-3 py-1.5 align-top">
-                            {inline(cell, ctx, `${key}-${r}-${j}`)}
-                          </td>
+                          <td key={j}>{inline(cell, ctx, `${key}-${r}-${j}`)}</td>
                         ))}
                       </tr>
                     ))}

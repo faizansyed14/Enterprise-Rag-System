@@ -27,7 +27,7 @@ Requirements: Docker with Compose v2, bash (WSL2 on Windows), about 8 GB of free
 ```bash
 scripts/start.sh          # creates .env with random secrets, downloads the local models, starts everything
 scripts/demo.sh           # optional: loads a sample library and demo users
-open http://localhost     # sign in with the admin e-mail and password start.sh printed
+open http://localhost:3000   # WEB_PORT; sign in with the admin e-mail and password start.sh printed
 ```
 
 Add an `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) to `.env` and run `scripts/restart.sh` to get
@@ -41,11 +41,15 @@ Every command for starting, stopping, monitoring, backing up and testing is in *
 | Document | Contents |
 |---|---|
 | [commands.md](commands.md) | Every command: start, stop, Prometheus, backup, users, tests |
-| [docs/architecture.md](docs/architecture.md) | Services, data flow, ingestion pipeline, data model |
+| [docs/architecture.md](docs/architecture.md) | Services, code layout, ingestion pipeline, question flow, job queue, data model, caching (Mermaid diagrams) |
+| [docs/data-flows.md](docs/data-flows.md) | Step by step: uploads and ZIP folders, a file through the pipeline, a question, permission changes, index rebuilds |
+| [docs/codebase-map.md](docs/codebase-map.md) | What every file in the repository does |
+| [docs/dead-code.md](docs/dead-code.md) | Unused functions, files and settings, verified one by one |
+| [docs/recommendations.md](docs/recommendations.md) | Accuracy and scaling (2 → 5 → 10 TB) recommendations, open security findings |
 | [docs/configuration.md](docs/configuration.md) | `.env` roles, providers, path rules, fusion weights |
 | [docs/retrieval.md](docs/retrieval.md) | How a question becomes cited evidence, and why |
 | [docs/parsing.md](docs/parsing.md) | PDF, scan, table and image reading; measured comparison; Docling status |
-| [docs/scaling.md](docs/scaling.md) | Sizing for 5 TB, what scales how, what is not yet proven |
+| [docs/scaling.md](docs/scaling.md) | Sizing for 5 TB (10 TB in recommendations.md), what scales how, what is not yet proven |
 | [docs/security.md](docs/security.md) | Authentication, access control, uploads, hardening checklist |
 | [docs/connectors.md](docs/connectors.md) | SharePoint, OneDrive, Windows shares, folders; Entra app registration |
 | [docs/monitoring.md](docs/monitoring.md) | Monitor page, alerts, Prometheus and Grafana |

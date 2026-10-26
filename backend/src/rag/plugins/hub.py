@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import select
 
@@ -75,7 +75,7 @@ class ModelHub:
         spec = parse_role(role, line) if line else self.spec(role)
         if spec.is_off:
             return None
-        key = (role, spec.label)
+        key = (role, spec.label, tuple(sorted(spec.options.items())))  # the same model with other options is another instance
         instance = self._instances.get(key)
         if instance is None:
             if role == "OCR" and spec.provider == "vision":
@@ -146,13 +146,64 @@ class ModelHub:
         return self.try_get("OCR")
 
     def vision(self) -> Any:
-        return self.try_get("VISION")
+        """The vision model; with VISION_FALLBACK set, a second model takes over any request the first one fails (HTTP 429)."""
+        primary = self.try_get("VISION")
+        line = self.settings.vision_fallback.strip()
+        if primary is None or not line or line == self.spec("VISION").label:
+            return primary
+        key = ("VISION", "with fallback", self.spec("VISION").label, line)
+        wrapped = self._instances.get(key)
+        if wrapped is None:
+            from rag.providers.ocr.vision import FallbackVision
+
+            try:
+                backup = self.get("VISION", line)
+            except (ConfigurationError, ValueError) as exc:
+                if key not in self._unusable_logged:
+                    self._unusable_logged.add(key)
+                    log.warning("VISION_FALLBACK %s is not usable, continuing without it: %s", line, exc)
+                backup = None
+            wrapped = primary if backup is None else FallbackVision(primary, backup)
+            self._instances[key] = wrapped
+        return wrapped
+
+    def cad_options(self) -> Any:
+        """How AutoCAD sheets are analysed (rag/ingestion/cad_analysis.py): the CAD_VISION role (.env, or what the Models page
+        switched it to) and the CAD_* settings. None, and the sheets get the ordinary short description, when the role is none
+        or cannot be built (no key)."""
+        from rag.ingestion.cad_analysis import Options
+
+        from urllib.parse import urlencode
+
+        s = self.settings
+        spec = self.spec("CAD_VISION")
+        if spec.is_off:
+            return None
+        # A report of several thousand words is written after the model's hidden reasoning, and both count against the output
+        # limit: measured on a site plan, 14,700 of 16,000 tokens went on thinking and the report was cut off in its tenant
+        # table. OpenRouter is asked for low reasoning (CAD_REASONING; empty = the model's own default).
+        options = dict(spec.options)
+        effort = (getattr(s, "cad_reasoning", "") or "").strip().lower()
+        if effort and spec.provider == "openrouter":
+            options.setdefault("reasoning", effort)
+        line = spec.label + (f"?{urlencode(options)}" if options else "")
+        try:
+            model = self.get("CAD_VISION", line)
+        except (ConfigurationError, ValueError) as exc:
+            key = ("CAD_VISION", spec.label)
+            if key not in self._unusable_logged:
+                self._unusable_logged.add(key)
+                log.warning("CAD_VISION is not usable, AutoCAD sheets get the short description: %s", exc)
+            return None
+        return Options(model=model, tiles=s.cad_tiles, render_px=s.cad_render_px, max_sheets=s.cad_max_sheets,
+                       send_text=s.cad_send_text, max_tokens=s.cad_max_tokens, colour=s.cad_colour,
+                       timeout_s=s.cad_timeout_s) if model else None
 
     def parser(self) -> Any:
         """The PDF parser with OCR, vision, OCR cache and budgets attached."""
         from rag.ingestion.ocr_cache import cache_get, cache_put
-        from rag.privacy.shield import bank_kinds
         from rag.jobs.rate_limits import take_budget
+        from rag.privacy.shield import bank_kinds
 
         parser = self.get("PARSER")
         if parser is None:
@@ -170,8 +221,61 @@ class ModelHub:
 
             inner.attach(ocr=self.ocr(), ocr_label=ocr_label, ocr_is_cloud=not ocr_spec.is_local,
                          vision=self.vision(), cache_get=cache_get, cache_put=cache_put, take_budget=budget,
-                         protect_kinds=bank_kinds(self.settings.privacy_kind_list) if self.settings.privacy_mask_for_models else None)
+                         protect_kinds=(bank_kinds(self.settings.privacy_kind_list)
+                                        if self.settings.privacy_mask_for_models else None),
+                         cad=self.cad_options())
         return parser
+
+    OCR_MODES: ClassVar[dict[str, str]] = {"local": "local/rapidocr", "vision": "vision/default"}
+
+    def reading(self, ocr_mode: str | None = None) -> tuple[Any, Any]:
+        """(PDF parser, OCR engine) to read one file.
+
+        None: what the Models page says. "local": OCR on this server and no vision model at all, so nothing leaves it.
+        "vision": the vision model reads scans and images (the local OCR still checks each image for bank or id numbers
+        first). A chosen mode gets its own parser object, because attaching engines changes the parser and other files are
+        being read at the same moment; the OCR cache is not consulted, so the file really is read again."""
+        if ocr_mode is None:
+            return self.parser(), self.ocr()
+        if ocr_mode not in self.OCR_MODES:
+            raise ConfigurationError(f"unknown OCR mode {ocr_mode!r}; use local or vision")
+        from rag.ingestion.ocr_cache import cache_put
+        from rag.jobs.rate_limits import take_budget
+        from rag.privacy.shield import bank_kinds
+
+        if ocr_mode == "vision" and self.spec("VISION").is_off:
+            raise ConfigurationError(
+                "LLM OCR needs a vision model: choose one for 'Drawing and image reading' on the Models page"
+            )
+        ocr = self.get("OCR", self.OCR_MODES[ocr_mode])
+        vision = self.vision() if ocr_mode == "vision" else None
+        parser = registry.create(self.spec("PARSER"), self.settings)
+        inner = getattr(parser, "inner", parser)
+        if hasattr(inner, "attach"):
+            ocr_label = f"vision:{self.spec('VISION').label}" if ocr_mode == "vision" else self.OCR_MODES["local"]
+            limits = {
+                "cloud_ocr_pages": self.settings.cloud_ocr_pages_per_day,
+                "vision_pages": self.settings.vision_pages_per_day,
+            }
+
+            async def budget(bucket: str, amount: int) -> bool:
+                return await take_budget(bucket, amount, limits.get(bucket, 0))
+
+            async def no_cache(image_hash: str, engine: str) -> None:
+                return None
+
+            inner.attach(
+                ocr=ocr,
+                ocr_label=ocr_label,
+                ocr_is_cloud=ocr_mode == "vision",
+                vision=vision,
+                cache_get=no_cache,
+                cache_put=cache_put,
+                take_budget=budget,
+                protect_kinds=bank_kinds(self.settings.privacy_kind_list) if self.settings.privacy_mask_for_models else None,
+                cad=self.cad_options() if ocr_mode == "vision" else None,  # "local" means nothing leaves this server
+            )
+        return parser, ocr
 
     async def aclose(self) -> None:
         for instance in list(self._instances.values()):
@@ -191,14 +295,16 @@ class ModelHub:
         for role, spec in self.specs().items():
             info = registry.info(spec.capability, spec.provider) if not spec.is_off else None
             env = self.env_spec(role)
-            rows.append({
-                **spec.as_dict(),
-                "description": ROLE_DESCRIPTIONS.get(role, ""),
-                "provider_description": info.description if info else "",
-                "known_provider": spec.is_off or info is not None,
-                "missing": registry.missing_requirements(spec, self.settings) if info else [],
-                "overridden": spec.label != env.label,
-                "env_label": env.label,
-                "switchable": role in UI_SWITCHABLE_ROLES and self.settings.allow_ui_model_switch,
-            })
+            rows.append(
+                {
+                    **spec.as_dict(),
+                    "description": ROLE_DESCRIPTIONS.get(role, ""),
+                    "provider_description": info.description if info else "",
+                    "known_provider": spec.is_off or info is not None,
+                    "missing": registry.missing_requirements(spec, self.settings) if info else [],
+                    "overridden": spec.label != env.label,
+                    "env_label": env.label,
+                    "switchable": role in UI_SWITCHABLE_ROLES and self.settings.allow_ui_model_switch,
+                }
+            )
         return rows

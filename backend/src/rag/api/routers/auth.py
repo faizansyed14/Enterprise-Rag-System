@@ -122,7 +122,7 @@ async def oidc_callback(request: Request, services: ServicesDep, code: str = "",
         return RedirectResponse(f"{target}/login?error=microsoft", status_code=302)
     try:
         claims = await EntraOIDC(s).finish(code=code, state=state, cookie=request.cookies.get(OIDC_COOKIE, ""))
-    except (AuthError, Exception) as exc:  # noqa: BLE001 - every failure goes back to the sign-in page
+    except (AuthError, Exception) as exc:
         await audit("login_failed", target="entra", ip=client_ip(request), details={"error": type(exc).__name__})
         return RedirectResponse(f"{target}/login?error=microsoft", status_code=302)
     async with transaction() as conn:

@@ -220,6 +220,7 @@ class ParsedDocument:
     properties: dict[str, str] = field(default_factory=dict)
     attachments: list[tuple[str, bytes]] = field(default_factory=list)  # e-mail attachments become child items
     warnings: list[str] = field(default_factory=list)
+    previews: list[bytes | None] = field(default_factory=list)  # page images drawn while reading (CAD sheets), PNG
 
 
 @runtime_checkable

@@ -41,7 +41,9 @@ def table_text(tables: Sequence[dict[str, Any]] | None) -> str:
     return "\n".join(" | ".join(str(c) for c in row) for t in tables or [] for row in t.get("rows", []))
 
 
-def scan_pages(pages: Iterable[tuple[int, str, Sequence[dict[str, Any]] | None]], kinds: Sequence[str] = ALL_KINDS) -> dict[str, Any]:
+def scan_pages(
+    pages: Iterable[tuple[int, str, Sequence[dict[str, Any]] | None]], kinds: Sequence[str] = ALL_KINDS
+) -> dict[str, Any]:
     """Counts of what the shield finds in stored pages (text and table cells): totals and per page."""
     total: Counter[str] = Counter()
     per_page: dict[int, dict[str, int]] = {}
@@ -54,7 +56,8 @@ def scan_pages(pages: Iterable[tuple[int, str, Sequence[dict[str, Any]] | None]]
 
 
 def model_view(chunks: Iterable[tuple[int, str, str]], kinds: Sequence[str] = ALL_KINDS) -> dict[str, Any]:
-    """What a cloud model would receive from a document's chunks (page, header, text): the masked text of those that hold a value."""
+    """What a cloud model would receive from a document's chunks (page, header, text): the masked text of those that
+    hold a value."""
     total: Counter[str] = Counter()
     pages: dict[int, dict[str, Any]] = {}
     count = 0
@@ -68,6 +71,12 @@ def model_view(chunks: Iterable[tuple[int, str, str]], kinds: Sequence[str] = AL
         entry = pages.setdefault(page, {"page": page, "found": Counter(), "model_view": []})
         entry["found"].update(found)
         entry["model_view"].append(Vault(kinds).mask(raw))
-    return {"found": dict(total), "phrase": phrase(dict(total)), "chunks": count,
-            "pages": [{"page": p["page"], "found": dict(p["found"]), "model_view": "\n\n".join(p["model_view"])}
-                      for p in sorted(pages.values(), key=lambda p: p["page"])]}
+    return {
+        "found": dict(total),
+        "phrase": phrase(dict(total)),
+        "chunks": count,
+        "pages": [
+            {"page": p["page"], "found": dict(p["found"]), "model_view": "\n\n".join(p["model_view"])}
+            for p in sorted(pages.values(), key=lambda p: p["page"])
+        ],
+    }

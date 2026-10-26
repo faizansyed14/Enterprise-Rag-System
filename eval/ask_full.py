@@ -16,7 +16,7 @@ async def main(question: str) -> None:
 
     load_handlers()
     services = Services.create(get_settings())
-    principals = await principals_of(os.environ.get("BENCH_AS", "admin@example.com"))
+    principals = await principals_of(os.environ.get("BENCH_AS") or os.environ["BOOTSTRAP_ADMIN_EMAIL"])
     text = ""
     async for ev in Answerer(services).answer(question, principals=principals):
         name, data = ev["event"], ev["data"]

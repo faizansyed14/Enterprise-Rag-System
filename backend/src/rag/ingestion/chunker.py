@@ -114,8 +114,11 @@ _PART = re.compile(r"^(?:##?\s+)?(PART\s+\d+\b.*)$", re.I)
 _ARTICLE = re.compile(r"^(\d{1,2}\.\d{1,2}\s+[A-Z][^\n]{1,80})$")
 _NUMBERED = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,2}\.?\s+[A-Z؀-ۿ][^\n]{1,70})$")
 _MD = re.compile(r"^(#{1,6})\s+(.+)$")
-# "Table 11: year-end statement", "Figure 3 - Layout": the caption of what follows. Only counted when a table comes right after it.
-_CAPTION = re.compile(r"^(?:Table|Figure|Fig\.|Chart|Exhibit|Schedule|Appendix|Annex)\s*[A-Z]?\d+(?:\.\d+)*[A-Za-z]?\s*[:.\-–—]\s*\S", re.I)
+# "Table 11: year-end statement", "Figure 3 - Layout": the caption of what follows. Only counted when a
+# table comes right after it.
+_CAPTION = re.compile(
+    r"^(?:Table|Figure|Fig\.|Chart|Exhibit|Schedule|Appendix|Annex)\s*[A-Z]?\d+(?:\.\d+)*[A-Za-z]?\s*[:.\-–—]\s*\S", re.I
+)
 # a heading that carries a value (an address with @, a number of four or more digits) is also content
 _HEADING_HOLDS_VALUES = re.compile(r"@|\d{4,}")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟;])\s+")
@@ -187,8 +190,15 @@ class _Draft:
 
 
 class Chunker:
-    def __init__(self, counter: TokenCounter, *, chunk_tokens: int = 380, header_tokens: int = 64,
-                 overlap: float = 0.15, min_tokens: int = 48) -> None:
+    def __init__(
+        self,
+        counter: TokenCounter,
+        *,
+        chunk_tokens: int = 380,
+        header_tokens: int = 64,
+        overlap: float = 0.15,
+        min_tokens: int = 48,
+    ) -> None:
         self.counter = counter
         self.chunk_tokens = chunk_tokens
         self.header_tokens = header_tokens
@@ -204,11 +214,13 @@ class Chunker:
         # Trim the title, then the section path, until it fits.
         title = fields.title
         path = section_path
-        while self.counter.count(" | ".join(p for p in (fields.project, fields.doc_number, title, path) if p)) > self.header_tokens:
+        while (
+            self.counter.count(" | ".join(p for p in (fields.project, fields.doc_number, title, path) if p)) > self.header_tokens
+        ):
             if len(title) > 40:
                 title = title[: int(len(title) * 0.8)].rstrip() + "…"
             elif len(path) > 30:
-                path = "…" + path[-int(len(path) * 0.8):]
+                path = "…" + path[-int(len(path) * 0.8) :]
             else:
                 break
         return " | ".join(p for p in (fields.project, fields.doc_number, title, path) if p)
@@ -242,7 +254,7 @@ class Chunker:
                 run["keep"], run["level"] = len(path), level
                 path.append((path[-1][0] + 0.1, text, level))
             elif run["keep"] and level == run["level"] and path[0][2] < level:
-                del path[run["keep"]:]
+                del path[run["keep"] :]
                 path.append((path[-1][0] + 0.1, text, level))
             else:
                 run["keep"] = 0
@@ -258,8 +270,7 @@ class Chunker:
                 tb = page.title_block
                 parts = [f"{k.replace('_', ' ').title()}: {v}" for k, v in tb.items() if v]
                 text = "Drawing sheet title block - " + "; ".join(parts)
-                blocks.append(_Block(page.number, "title_block", text, page.label or "Title block",
-                                     self.counter.count(text)))
+                blocks.append(_Block(page.number, "title_block", text, page.label or "Title block", self.counter.count(text)))
             used_tables: set[int] = set()
             paragraph: list[str] = []
 
@@ -304,8 +315,8 @@ class Chunker:
                     flush()
                     push_heading(level, heading)
                     if len(heading) > 90 or _HEADING_HOLDS_VALUES.search(heading):
-                        # forms print a bold label and its value on one line ("Licence No.: 123456789012345 info@x.ae"); the title keeps
-                        # 90 characters, so such a line is content too and must stay in the text
+                        # forms print a bold label and its value on one line ("Licence No.: 123456789012345 info@x.ae"); the
+                        # title keeps 90 characters, so such a line is content too and must stay in the text
                         paragraph.append(heading)
                     continue
                 if line.startswith(("- ", "• ")) or re.match(r"^[A-Z]\.\s|^\d+\.\s|^[a-z]\)\s", line):
@@ -321,7 +332,7 @@ class Chunker:
     @staticmethod
     def _table_follows(lines: list[str], position: int) -> bool:
         """Is the next non-empty line a table marker?"""
-        for later in lines[position + 1: position + 3]:
+        for later in lines[position + 1 : position + 3]:
             if later.strip():
                 return bool(TABLE_MARKER_RE.fullmatch(later.strip()))
         return False
@@ -344,8 +355,13 @@ class Chunker:
         if _NUMBERED.match(line) and not line.endswith((".", ",", ";", ":")) and len(line.split()) <= 10:
             return 3, line
         letters = [c for c in line if c.isalpha()]
-        if (len(line.split()) <= 8 and len(letters) >= 4 and line.isupper() and not line.endswith((".", ","))
-                and not re.search(r"\d{3,}", line)):
+        if (
+            len(line.split()) <= 8
+            and len(letters) >= 4
+            and line.isupper()
+            and not line.endswith((".", ","))
+            and not re.search(r"\d{3,}", line)
+        ):
             return 4, line
         return 0, ""
 
@@ -397,7 +413,7 @@ class Chunker:
                 words = sentence.split()
                 step = max(1, int(len(words) * self.chunk_tokens / max(tokens, 1)))
                 for i in range(0, len(words), step):
-                    piece = " ".join(words[i: i + step])
+                    piece = " ".join(words[i : i + step])
                     pieces.append(_Block(block.page, block.kind, piece, block.path, self.counter.count(piece)))
                 continue
             if current and size + tokens > self.chunk_tokens:
@@ -425,8 +441,9 @@ class Chunker:
             size += tokens
         return " ".join(tail)
 
-    def chunk(self, pages: list[PageForChunking], fields: HeaderFields, *,
-              version_id: uuid.UUID | str | None = None) -> list[Chunk]:
+    def chunk(
+        self, pages: list[PageForChunking], fields: HeaderFields, *, version_id: uuid.UUID | str | None = None
+    ) -> list[Chunk]:
         blocks = [piece for block in self._blocks(pages) for piece in self._split_long(block)]
         drafts: list[_Draft] = []
         current: list[_Block] = []
@@ -440,8 +457,16 @@ class Chunker:
             if text:
                 kinds = {b.kind for b in current}
                 kind = kinds.pop() if len(kinds) == 1 else ("table" if "table" in kinds else "text")
-                drafts.append(_Draft(current[0].page, current[-1].page, kind, _common_path([b.path for b in current]),
-                                     text, self.counter.count(text)))
+                drafts.append(
+                    _Draft(
+                        current[0].page,
+                        current[-1].page,
+                        kind,
+                        _common_path([b.path for b in current]),
+                        text,
+                        self.counter.count(text),
+                    )
+                )
             current, size = [], 0
 
         caption_tokens = 40
@@ -449,18 +474,18 @@ class Chunker:
             hard = bool(current) and (
                 block.page != current[-1].page
                 or _major_change(block.path, current[-1].path)
-                or block.kind == "title_block" or current[-1].kind == "title_block"
+                or block.kind == "title_block"
+                or current[-1].kind == "title_block"
             )
             if current and not hard:
                 last = current[-1]
                 caption = block.kind == "table" and last.kind == "text" and size <= caption_tokens
-                if block.kind != last.kind and not caption:
+                if (block.kind != last.kind and not caption) or (
+                    block.path != last.path and (size >= self.chunk_tokens * 0.3 or block.kind == "table")
+                ):
                     hard = True
-                elif block.path != last.path and (size >= self.chunk_tokens * 0.3 or block.kind == "table"):
-                    hard = True  # new article/sub-heading and the current chunk already has substance; a table keeps its own heading
             if current and (hard or size + block.tokens > self.chunk_tokens):
-                carry = "" if hard or block.kind != "text" or current[-1].kind != "text" else \
-                    self._overlap_tail(current[-1].text)
+                carry = "" if hard or block.kind != "text" or current[-1].kind != "text" else self._overlap_tail(current[-1].text)
                 emit()
                 if carry and carry != block.text:
                     current.append(_Block(block.page, "text", carry, block.path, self.counter.count(carry)))
@@ -476,11 +501,20 @@ class Chunker:
             ids += [k for k in label_keys(draft.path) if k not in ids]  # "Table 11" in this chunk's caption
             if fields.doc_number_key and fields.doc_number_key not in ids:
                 ids.insert(0, fields.doc_number_key)
-            chunks.append(Chunk(
-                chunk_no=len(chunks), page_start=draft.page_start, page_end=draft.page_end, section_path=draft.path,
-                kind=draft.kind, header=header, text=draft.text, token_count=draft.tokens,
-                language=detect_language(draft.text), identifiers=ids,
-            ))
+            chunks.append(
+                Chunk(
+                    chunk_no=len(chunks),
+                    page_start=draft.page_start,
+                    page_end=draft.page_end,
+                    section_path=draft.path,
+                    kind=draft.kind,
+                    header=header,
+                    text=draft.text,
+                    token_count=draft.tokens,
+                    language=detect_language(draft.text),
+                    identifiers=ids,
+                )
+            )
         for chunk in chunks:
             if version_id is not None:
                 chunk.id = chunk_id(version_id, chunk.chunk_no)

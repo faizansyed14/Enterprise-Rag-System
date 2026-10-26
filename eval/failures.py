@@ -33,7 +33,7 @@ async def main(golden: str, kinds: set[str], limit: int, overrides: str) -> None
     settings = get_settings()
     apply(settings, overrides)
     services = Services.create(settings)
-    principals = await principals_of(os.environ.get("BENCH_AS", "admin@example.com"))
+    principals = await principals_of(os.environ.get("BENCH_AS") or os.environ["BOOTSTRAP_ADMIN_EMAIL"])
     retriever = Retriever(services)
     router = QueryRouter(known_projects=await services.known_projects())
     shown = 0

@@ -1,11 +1,11 @@
 "use client";
 
 import { ArrowLeft, ChevronLeft, ChevronRight, FileUp, Folder, FolderOpen, Search, Trash2 } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ProcessingQueue } from "@/components/documents/processing-queue";
-import { DeleteDialog, EditProjectDialog, RowMenu } from "@/components/documents/row-actions";
+import { DeleteDialog, EditProjectDialog, ReprocessDialog, RowActions } from "@/components/documents/row-actions";
 import { UploadDialog } from "@/components/documents/upload-dialog";
 import { Button, IconButton } from "@/components/ui/button";
 import { EmptyState, ErrorNote, Spinner } from "@/components/ui/feedback";
@@ -18,18 +18,20 @@ import type { DocumentRow, Facets } from "@/lib/types";
 const PAGE = 50;
 const NO_PROJECT = "__none__"; // the folder of files that have no project yet
 
-export default function DocumentsPage() {
+function DocumentsPage() {
   const router = useRouter();
+  const route = useSearchParams();
+  const project = route.get("project") ?? "";
+  const showAll = route.get("all") === "1";
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [project, setProject] = useState("");
   const [docType, setDocType] = useState("");
   const [sort, setSort] = useState("newest");
   const [offset, setOffset] = useState(0);
   const [uploading, setUploading] = useState(false);
-  const [showAll, setShowAll] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<DocumentRow | null>(null);
+  const [reprocessing, setReprocessing] = useState<DocumentRow | null>(null);
   const [deleting, setDeleting] = useState<{ ids: string[]; label: string } | null>(null);
 
   useEffect(() => {
@@ -45,6 +47,20 @@ export default function DocumentsPage() {
   const pick = (set: (v: string) => void) => (event: { target: { value: string } }) => {
     set(event.target.value);
     setOffset(0);
+  };
+  const openLibrary = (next: { project?: string; all?: boolean }) => {
+    const q = new URLSearchParams(route.toString());
+    if (next.project) q.set("project", next.project);
+    else q.delete("project");
+    if (next.all) q.set("all", "1");
+    else q.delete("all");
+    const search = q.toString();
+    router.replace(search ? `/documents?${search}` : "/documents", { scroll: false });
+    setOffset(0);
+  };
+  const openDocument = (id: string) => {
+    const from = project || (showAll ? "__all__" : "");
+    router.push(from ? `/documents/${id}?from=${encodeURIComponent(from)}` : `/documents/${id}`);
   };
 
   const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
@@ -106,7 +122,7 @@ export default function DocumentsPage() {
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="A-101, RFI-023, Marina Tower specification…" className="pl-9" aria-label="Search documents" />
         </div>
-        <Select value={project} onChange={pick(setProject)} className="!w-auto min-w-[160px] max-w-[220px]" aria-label="Project">
+        <Select value={project} onChange={(e) => openLibrary({ project: e.target.value, all: false })} className="!w-auto min-w-[160px] max-w-[220px]" aria-label="Project">
           <option value="">All projects</option>
           {facets?.unassigned ? (
             <option value={NO_PROJECT}>
@@ -146,10 +162,7 @@ export default function DocumentsPage() {
               <button
                 key={f.value}
                 type="button"
-                onClick={() => {
-                  setProject(f.value);
-                  setOffset(0);
-                }}
+                onClick={() => openLibrary({ project: f.value, all: false })}
                 className="group flex items-center gap-3 rounded-2xl border border-border px-4 py-3.5 text-left transition-colors hover:bg-surface-hover"
               >
                 <Folder size={26} strokeWidth={1.5} className="shrink-0 text-muted group-hover:hidden" aria-hidden />
@@ -164,7 +177,7 @@ export default function DocumentsPage() {
             ))}
             <button
               type="button"
-              onClick={() => setShowAll(true)}
+              onClick={() => openLibrary({ project: "", all: true })}
               className="flex items-center gap-3 rounded-2xl border border-dashed border-border-strong px-4 py-3.5 text-left transition-colors hover:bg-surface-hover"
             >
               <FolderOpen size={26} strokeWidth={1.5} className="shrink-0 text-muted" aria-hidden />
@@ -181,11 +194,7 @@ export default function DocumentsPage() {
               size="sm"
               variant="ghost"
               icon={<ArrowLeft size={14} aria-hidden />}
-              onClick={() => {
-                setProject("");
-                setShowAll(false);
-                setOffset(0);
-              }}
+              onClick={() => openLibrary({ project: "", all: false })}
             >
               All folders
             </Button>
@@ -265,7 +274,7 @@ export default function DocumentsPage() {
                   <Th>Project</Th>
                   <Th align="right">Pages</Th>
                   <Th>Added</Th>
-                  <Th className="w-12">
+                  <Th className="w-[120px]">
                     <span className="sr-only">Actions</span>
                   </Th>
                 </tr>
@@ -275,8 +284,8 @@ export default function DocumentsPage() {
                   <tr
                     key={d.id}
                     tabIndex={0}
-                    onClick={() => router.push(`/documents/${d.id}`)}
-                    onKeyDown={(e) => e.key === "Enter" && router.push(`/documents/${d.id}`)}
+                    onClick={() => openDocument(d.id)}
+                    onKeyDown={(e) => e.key === "Enter" && openDocument(d.id)}
                     className="cursor-pointer transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover"
                   >
                     <Td className="w-10 !pr-0">
@@ -300,11 +309,12 @@ export default function DocumentsPage() {
                     <Td className="max-w-[180px] truncate">{d.project_ids.join(", ") || <span className="text-muted">—</span>}</Td>
                     <Td align="right">{d.page_count}</Td>
                     <Td className="whitespace-nowrap text-muted">{shortDate(d.updated_at)}</Td>
-                    <Td className="w-12 !px-2">
+                    <Td className="w-[120px] !px-2">
                       <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-                        <RowMenu
+                        <RowActions
                           title={d.doc_number || d.file_name || d.title}
                           onEdit={() => setEditing(d)}
+                          onReprocess={() => setReprocessing(d)}
                           onDelete={() => setDeleting({ ids: [d.id], label: `“${d.file_name || d.title}” will be deleted.` })}
                         />
                       </div>
@@ -339,8 +349,24 @@ export default function DocumentsPage() {
           onSaved={onUploaded}
         />
       ) : null}
+      {reprocessing ? (
+        <ReprocessDialog
+          id={reprocessing.id}
+          title={reprocessing.file_name || reprocessing.title}
+          onClose={() => setReprocessing(null)}
+          onQueued={onUploaded}
+        />
+      ) : null}
       {deleting ? <DeleteDialog ids={deleting.ids} label={deleting.label} onClose={() => setDeleting(null)} onDeleted={afterChange} /> : null}
       {uploading ? <UploadDialog onClose={() => setUploading(false)} onUploaded={onUploaded} /> : null}
     </div>
+  );
+}
+
+export default function DocumentsRoute() {
+  return (
+    <Suspense fallback={<div className="px-6 py-8 lg:px-10"><Spinner label="Loading documents" /></div>}>
+      <DocumentsPage />
+    </Suspense>
   );
 }

@@ -36,6 +36,7 @@ ROLES: dict[str, Capability] = {
     "LLM_ROUTER": Capability.CHAT,
     "LLM_ENRICH": Capability.CHAT,
     "VISION": Capability.VISION,
+    "CAD_VISION": Capability.VISION,
     "EMBEDDER": Capability.EMBEDDER,
     "RERANKER": Capability.RERANKER,
     "GROUNDEDNESS": Capability.GROUNDEDNESS,
@@ -50,17 +51,21 @@ ROLE_DESCRIPTIONS: dict[str, str] = {
     "LLM_ROUTER": "Rewrites follow-ups, translates queries and reads filters from questions",
     "LLM_ENRICH": "Fills metadata gaps (title, type) during ingestion",
     "VISION": "Reads drawing sheets and pages that text extraction cannot",
+    "CAD_VISION": "Analyses AutoCAD drawings (.dwg, .dxf): each sheet at high resolution, in tiles, into a structured report",
     "EMBEDDER": "Turns chunks and questions into dense vectors",
     "RERANKER": "Re-scores the top candidates with a cross-encoder",
     "GROUNDEDNESS": "Checks that each answer sentence is supported by its cited passage",
     "PARSER": "Reads PDF pages (text layer, tables, layout)",
-    "OCR": "Reads scanned pages, tables and pictures: with the local OCR, or with the vision model (better on tables and handwriting, a model call per page)",
+    "OCR": "Reads scanned pages, tables and pictures: with the local OCR, or with the vision model "
+           "(better on tables and handwriting, a model call per page)",
 }
 
 # Roles that may be switched from the UI at runtime: the chat and vision models, and how scanned pages are read (which applies
 # to files uploaded afterwards; files already stored need `rag reparse`). Everything else changes the index and is switched in
 # `.env` with a rebuild, so that switch is deliberate.
-UI_SWITCHABLE_ROLES = frozenset({"LLM_ANSWER", "LLM_ANSWER_HARD", "LLM_ANSWER_FALLBACK", "LLM_ROUTER", "LLM_ENRICH", "VISION", "OCR"})
+UI_SWITCHABLE_ROLES = frozenset(
+    {"LLM_ANSWER", "LLM_ANSWER_HARD", "LLM_ANSWER_FALLBACK", "LLM_ROUTER", "LLM_ENRICH", "VISION", "CAD_VISION", "OCR"}
+)
 
 # Providers that run inside this deployment (no data leaves it).
 LOCAL_PROVIDERS = frozenset({"local", "hashing", "extractive", "lexical", "builtin", "none", "openai_compat"})

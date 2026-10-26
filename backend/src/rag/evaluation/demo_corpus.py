@@ -308,7 +308,3 @@ def build_demo_corpus(root: Path) -> dict[str, Path]:
     _pdf(restricted / "Marina Tower" / "Commercial" / "VO-15 Variation Order - Additional piling.pdf", VO_15)
     return {"public": public, "restricted": restricted}
 
-
-def corpus_bytes_summary(root: Path) -> list[tuple[str, int]]:
-    return sorted((str(p.relative_to(root)), p.stat().st_size) for p in root.rglob("*") if p.is_file())
-

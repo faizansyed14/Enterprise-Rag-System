@@ -23,13 +23,33 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --extra ocr --extra s3 --extra msg --extra demo
 
+# ---- LibreDWG: reads AutoCAD .dwg files (rag.ingestion.cad) ----------------------------------------------------------------
+# GNU LibreDWG (GPLv3, used as a separate program) is not packaged for Debian, so it is built here; only dwg2dxf and its library
+# go into the image. The download is checked against a pinned SHA-256. One compile job at a time: a single source file needs
+# more than 1 GB of memory to compile, so parallel jobs can exhaust a small Docker VM (raise LIBREDWG_JOBS on a larger one).
+FROM ${PYTHON_IMAGE} AS libredwg
+ARG LIBREDWG_VERSION=0.14
+ARG LIBREDWG_SHA256=62ebb73b984f865960f20ed26619ea5f8789d5e3fd088fa40a2598384da81275
+ARG LIBREDWG_JOBS=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential pkg-config curl ca-certificates xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/libredwg.tar.xz "https://ftp.gnu.org/gnu/libredwg/libredwg-${LIBREDWG_VERSION}.tar.xz" \
+ && echo "${LIBREDWG_SHA256}  /tmp/libredwg.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/libredwg.tar.xz -C /tmp \
+ && cd "/tmp/libredwg-${LIBREDWG_VERSION}" \
+ && ./configure --prefix=/opt/libredwg --disable-bindings --disable-docs --disable-static >/dev/null \
+ && make -j"${LIBREDWG_JOBS}" >/dev/null \
+ && make install >/dev/null \
+ && /opt/libredwg/bin/dwg2dxf --version
+
 # ---- runtime -------------------------------------------------------------------------------------------------------------
 FROM ${PYTHON_IMAGE} AS runtime
 # LibreOffice converts legacy .doc/.xls/.ppt/.rtf before parsing. It adds ~600 MB, so it is opt-in:
 #   docker build --build-arg INSTALL_LIBREOFFICE=true .
 ARG INSTALL_LIBREOFFICE=false
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+ && apt-get install -y --no-install-recommends ca-certificates libgomp1 libcairo2 fonts-dejavu-core \
  && if [ "$INSTALL_LIBREOFFICE" = "true" ]; then \
       apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui; \
     fi \
@@ -39,6 +59,10 @@ RUN groupadd --gid 10001 rag \
  && mkdir -p /data/originals /data/cache /data/demo /data/eval \
  && chown -R rag:rag /data
 COPY --from=build /app/.venv /app/.venv
+# AutoCAD .dwg -> .dxf (libcairo2 and fonts-dejavu above draw the sheets for previews and the vision model)
+COPY --from=libredwg /opt/libredwg/bin/dwg2dxf /usr/local/bin/dwg2dxf
+COPY --from=libredwg /opt/libredwg/lib/libredwg.so* /usr/local/lib/
+RUN ldconfig && dwg2dxf --version
 COPY alembic.ini /app/alembic.ini
 COPY alembic /app/alembic
 ENV PATH="/app/.venv/bin:${PATH}" \

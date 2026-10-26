@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, CircleAlert, Clock, LoaderCircle } from "lucide-react";
+import { ChevronDown, CircleAlert, Clock, LoaderCircle, Lock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ type Item = {
   pages: number | null;
   retry_jobs: number[];
 };
-type Queue = { items: Item[]; running: number; waiting: number; failed: number; jobs_ahead: number };
+type Queue = { items: Item[]; more: number; running: number; waiting: number; failed: number; jobs_ahead: number };
 
 function elapsed(seconds: number | null): string {
   if (seconds === null) return "";
@@ -79,14 +79,21 @@ export function ProcessingQueue({ onFinished }: { onFinished: () => void }) {
                 <LoaderCircle size={15} className="mt-0.5 shrink-0 animate-spin text-muted motion-reduce:animate-none" aria-label="Processing" />
               ) : item.state === "waiting" ? (
                 <Clock size={15} className="mt-0.5 shrink-0 text-muted" aria-label="Waiting" />
+              ) : item.step.startsWith("Protected:") ? (
+                <Lock size={15} className="mt-0.5 shrink-0 text-warning" aria-label="Protected" />
               ) : (
                 <CircleAlert size={15} className="mt-0.5 shrink-0 text-danger" aria-label="Failed" />
               )}
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">{item.name}</span>
                 <span className={`block text-[12px] ${item.state === "failed" ? "text-danger" : "text-muted"}`}>
-                  {item.step}
+                  <span className="font-medium text-foreground/80">
+                    {item.state === "running" ? "Running" : item.state === "waiting" ? "Waiting" : item.step.startsWith("Protected:") ? "Protected" : "Failed"}
+                  </span>
+                  {" · "}
+                  {item.step.replace(/^Protected: /, "")}
                   {item.seconds !== null ? ` · ${elapsed(item.seconds)}` : ""}
+                  {item.pages ? ` · ${item.pages} pages` : ""}
                   {item.chunks ? ` · ${item.chunks} chunks` : ""}
                 </span>
               </span>
@@ -97,6 +104,11 @@ export function ProcessingQueue({ onFinished }: { onFinished: () => void }) {
               ) : null}
             </li>
           ))}
+          {data.more > 0 ? (
+            <li className="px-4 py-2 text-[12px] text-muted">
+              Showing the first {data.items.length.toLocaleString()}; {data.more.toLocaleString()} more are not listed here, and are counted above.
+            </li>
+          ) : null}
           {data.jobs_ahead > 0 ? (
             <li className="px-4 py-2 text-[12px] text-muted">{data.jobs_ahead} steps are waiting in the queue across all files.</li>
           ) : null}

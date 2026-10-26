@@ -18,6 +18,57 @@ Every PDF page gets the cheapest method that reads it correctly:
 Word, Excel, PowerPoint, e-mail, HTML and images are read natively; images go straight to OCR. The output is plain
 text with tables kept as rows, which the chunker splits along headings and table rows.
 
+## AutoCAD drawings (`.dwg`, `.dxf`)
+
+`ingestion/cad.py` reads drawings directly. They are not printed to PDF first.
+
+1. **Recognise.** A DWG starts with `AC10` plus digits (the format version). A DXF is text that opens with a `SECTION`
+   group. Both are recognised by content, not by name.
+2. **Convert.** A DWG is converted to DXF by LibreDWG's `dwg2dxf`, which is built into the backend image. The converter
+   runs as a separate process with a fixed argument list and a 180 s timeout. The DXF is then read with ezdxf's
+   `recover` mode, which tolerates damaged files.
+3. **One page per sheet.** Model space becomes one page and every paper-space layout another. Each page holds:
+   - the sheet's text, top to bottom (TEXT, MTEXT with formatting codes removed, dimension values, block attributes);
+   - the layers and blocks it uses;
+   - a title block mapped from attribute tags (`DRAWING_TITLE` becomes title, `DWG-NO` becomes doc_number, then scale,
+     revision, project number, sheet number …). Model space keeps a title block only when it has a title or a number.
+4. **Draw.** Each sheet is drawn with ezdxf's SVG backend (white background, black lines, hatches as outlines) on an A3
+   page and turned into a PNG with cairosvg. The PNG is the viewer's page image, and it is pre-rendered at extraction.
+   Objects far outside the drawing are left out of the frame (gap-based trimming in `_main_range`).
+5. **Analyse (its own flow, `ingestion/cad_analysis.py`, model `CAD_VISION`).** The sheets worth analysing are drawn
+   **again at high resolution and in colour** (`CAD_RENDER_PX`, 6,000 px, about 360 dpi on A3; layer colours and solid
+   fills kept, because colour often means allocated, vacant or a zone). The blank margin is cropped away and the sheet is
+   cut into overlapping tiles (`CAD_TILES`, 4×3; a tall drawing is turned round; all-white tiles are dropped).
+   **One** request carries a system prompt and a user prompt written for architectural drawings, the full overview,
+   every tile labelled `R<row>C<col>`, the text read from the file (to check the spelling of labels) and what the file's other
+   sheets state: their title-block
+   fields and the start of their text, where the project name and owner usually are. The reply is a Markdown report: YAML front matter, summary, tenant schedule, service
+   rooms, circulation, external works, detail references, and gaps. Values in its front matter lose any remark in brackets
+   before they become the title or number. It is added to the sheet's text as `[Sheet analysis]`,
+   so its headings and its table rows are chunked and searched like any other page, and its front matter fills the title,
+   drawing number, revision, scale and project.
+   - **Which sheets:** the first `CAD_MAX_SHEETS` (3) that have text and at least 300 objects. A layout that holds only a
+     frame and a title block is skipped: analysing it would produce a report full of "not stated".
+   - **Empty or cut-off reply:** a reply too short to be a report (the model spent its output allowance on hidden
+     reasoning) is requested again once with the limit doubled. A long report cut at the limit is kept.
+   - **Cost and limits:** about 13 images per sheet; the daily `VISION_PAGES_PER_DAY` budget applies; a sheet whose text
+     holds a protected value (an IBAN, for example) is never sent.
+   - **Model:** chosen on the Models page ("AutoCAD drawing analysis") or with `CAD_VISION`. OpenRouter models are asked for
+     low hidden reasoning by default (`CAD_REASONING`), because thinking counts against the output limit: on a site plan
+     14,700 of 16,000 tokens went on it and the report was cut off in its tenant table. `?reasoning=` on a model line
+     overrides it.
+6. **Short description (fallback).** Sheets that were not analysed (beyond the limit, empty, or the analysis failed) get
+   the earlier short description from the `VISION` model: a title, a drawing number and a summary, added as
+   `[Sheet description] …`. With `CAD_VISION=none` every sheet gets only this.
+
+Limits:
+
+- a paper-space viewport is drawn empty;
+- hatches are drawn as outlines;
+- external references (xrefs) are not loaded.
+
+## OCR spacing
+
 OCR output from RapidOCR often drops spaces ("rescheduled to24March2026"). `rag.text.ocr_spacing` puts them back with a
 word-frequency model while leaving identifiers, codes (C40, SI-014), numbers and short capitalised names alone.
 

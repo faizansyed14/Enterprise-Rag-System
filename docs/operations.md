@@ -77,8 +77,8 @@ For a 5 TB library:
 | Rotate `SECRET_KEY` | Edit `.env`, `scripts/restart.sh` (everyone signs in again) |
 | Rotate the Qdrant key / DB password | Change in `.env` **and** in the running service (`ALTER USER` / recreate the `qdrant` container with the new key), then restart |
 | Retry failed work | Monitor → Failed jobs, or `rag jobs retry-dead` |
-| Remove a source | Sources → delete (its documents leave search quickly; originals stay until garbage collection) |
-| Free disk | Originals of deleted documents are removed by the daily blob garbage collection |
+| Remove a source | Sources → delete. Its documents leave search quickly; each released version purges its pages, vectors and original at once when nothing else uses that file (`purge_unused_file`), and `gc_blobs` (every 6 h) is the backstop. |
+| Free disk | Originals of deleted documents are removed when their version is released, or by `gc_blobs` (every 6 h, up to 500 files per run) |
 
 ## Troubleshooting
 
@@ -99,7 +99,7 @@ For a 5 TB library:
 ## Data retention and deletion
 
 - Deleting a document at its source removes it from search at the next sync; its text and vectors are removed by a
-  control-lane job, its original by garbage collection once nothing refers to the blob.
+  control-lane job, and its original right after, once nothing refers to the blob (`gc_blobs` catches anything left).
 - Conversations belong to their user and can be deleted by them.
 - Traces expire after `MONITOR_RETENTION_DAYS`, rollups after `METRIC_RETENTION_DAYS`, finished jobs and expired sessions
   are cleaned hourly.

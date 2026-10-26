@@ -48,7 +48,7 @@ async def main(answerable: str, unanswerable: str, losses: list[float]) -> None:
     if cache_file.exists():
         cache.update(pickle.loads(cache_file.read_bytes()))
     settings.rerank_cache_size = 1_000_000
-    principals = await principals_of(os.environ.get("BENCH_AS", "admin@example.com"))
+    principals = await principals_of(os.environ.get("BENCH_AS") or os.environ["BOOTSTRAP_ADMIN_EMAIL"])
     items = [q for q in bench.load_questions(answerable) if not q.get("not_found")]
     nf = [q for q in bench.load_questions(unanswerable) if q.get("not_found")]
     nf += [q for q in bench.load_questions(answerable) if q.get("not_found")]

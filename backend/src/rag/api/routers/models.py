@@ -138,16 +138,27 @@ async def role_options(role: str, _: AdminDep, services: ServicesDep) -> dict:
         elif info.provider == "extractive":
             entry["models"] = [{"id": "default", "name": "Sentences from the passages (no model)", "free": True}]
         elif capability.value == "ocr":
-            names = {"local": ("rapidocr", "RapidOCR on this server: free, English and Chinese, loose lines"),
-                     "vision": ("default", "The vision model reads each page: tables, handwriting and pictures too. One model call per page")}
+            names = {
+                "local": ("rapidocr", "RapidOCR on this server: free, English and Chinese, loose lines"),
+                "vision": (
+                    "default",
+                    "The vision model reads each page: tables, handwriting and pictures too. One model call per page",
+                ),
+            }
             model_id, name = names.get(info.provider, ("default", info.description))
             entry["models"] = [{"id": model_id, "name": name, "free": info.local}]
         else:
             entry["custom"] = True  # a provider without a public catalogue: the model id is typed
         providers.append(entry)
     providers.sort(key=lambda p: (p["provider"] != "openrouter", not p["configured"], p["provider"]))
-    return {"role": role, "current": services.hub.spec(role).label, "providers": providers,
-            "catalogue_available": bool(catalogue), "zdr": s.openrouter_zdr, "images_required": images_required}
+    return {
+        "role": role,
+        "current": services.hub.spec(role).label,
+        "providers": providers,
+        "catalogue_available": bool(catalogue),
+        "zdr": s.openrouter_zdr,
+        "images_required": images_required,
+    }
 
 
 class SwitchBody(BaseModel):
@@ -162,15 +173,18 @@ async def switch_role(role: str, body: SwitchBody, request: Request, user: Admin
     if not s.allow_ui_model_switch:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Model switching is disabled (ALLOW_UI_MODEL_SWITCH=false)")
     if role not in UI_SWITCHABLE_ROLES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            f"{role} changes the index or ingestion; change it in .env (and rebuild if needed)")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"{role} changes the index or ingestion; change it in .env (and rebuild if needed)"
+        )
     try:
         spec = parse_role(role, body.spec)
     except RoleSpecError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if role == "OCR" and spec.provider == "vision" and services.hub.spec("VISION").is_off:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            "Choose a model for 'Drawing and image reading' first: reading pages with vision uses that model")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Choose a model for 'Drawing and image reading' first: reading pages with vision uses that model",
+        )
     if not spec.is_off:
         info = registry.info(spec.capability, spec.provider)
         if info is None:
@@ -180,14 +194,20 @@ async def switch_role(role: str, body: SwitchBody, request: Request, user: Admin
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{spec.label} needs {', '.join(missing)} in .env")
     previous = services.hub.spec(role).label
     async with transaction() as conn:
-        await conn.execute(insert(schema.role_overrides).values(role=role, spec=spec.label, updated_by=user.id)
-                           .on_conflict_do_update(index_elements=[schema.role_overrides.c.role],
-                                                  set_={"spec": spec.label, "updated_by": user.id}))
-        await conn.execute(schema.model_switches.insert().values(role=role, from_spec=previous, to_spec=spec.label,
-                                                                 switched_by=user.id, reason=body.reason))
+        await conn.execute(
+            insert(schema.role_overrides)
+            .values(role=role, spec=spec.label, updated_by=user.id)
+            .on_conflict_do_update(
+                index_elements=[schema.role_overrides.c.role], set_={"spec": spec.label, "updated_by": user.id}
+            )
+        )
+        await conn.execute(
+            schema.model_switches.insert().values(
+                role=role, from_spec=previous, to_spec=spec.label, switched_by=user.id, reason=body.reason
+            )
+        )
     await services.hub.refresh_overrides(force=True)
-    await audit("model_switch", user_id=user.id, target=role, ip=client_ip(request),
-                details={"from": previous, "to": spec.label})
+    await audit("model_switch", user_id=user.id, target=role, ip=client_ip(request), details={"from": previous, "to": spec.label})
     return {"role": role, "spec": spec.label, "previous": previous}
 
 
@@ -197,9 +217,15 @@ async def reset_role(role: str, request: Request, user: AdminDep, services: Serv
     previous = services.hub.spec(role).label
     async with transaction() as conn:
         await conn.execute(schema.role_overrides.delete().where(schema.role_overrides.c.role == role))
-        await conn.execute(schema.model_switches.insert().values(
-            role=role, from_spec=previous, to_spec=services.hub.env_spec(role).label, switched_by=user.id,
-            reason="reset to .env"))
+        await conn.execute(
+            schema.model_switches.insert().values(
+                role=role,
+                from_spec=previous,
+                to_spec=services.hub.env_spec(role).label,
+                switched_by=user.id,
+                reason="reset to .env",
+            )
+        )
     await services.hub.refresh_overrides(force=True)
     await audit("model_reset", user_id=user.id, target=role, ip=client_ip(request))
     return {"role": role, "spec": services.hub.spec(role).label}
@@ -210,11 +236,27 @@ async def switch_history(_: AdminDep, limit: int = 50) -> dict:
     from sqlalchemy import select
 
     async with transaction() as conn:
-        rows = (await conn.execute(select(schema.model_switches, schema.users.c.email)
-                                   .outerjoin(schema.users, schema.users.c.id == schema.model_switches.c.switched_by)
-                                   .order_by(schema.model_switches.c.switched_at.desc()).limit(min(limit, 200)))).all()
-    return {"switches": [{"role": r.role, "from": r.from_spec, "to": r.to_spec, "by": r.email, "reason": r.reason,
-                          "at": r.switched_at.isoformat()} for r in rows]}
+        rows = (
+            await conn.execute(
+                select(schema.model_switches, schema.users.c.email)
+                .outerjoin(schema.users, schema.users.c.id == schema.model_switches.c.switched_by)
+                .order_by(schema.model_switches.c.switched_at.desc())
+                .limit(min(limit, 200))
+            )
+        ).all()
+    return {
+        "switches": [
+            {
+                "role": r.role,
+                "from": r.from_spec,
+                "to": r.to_spec,
+                "by": r.email,
+                "reason": r.reason,
+                "at": r.switched_at.isoformat(),
+            }
+            for r in rows
+        ]
+    }
 
 
 # ---- index builds -------------------------------------------------------------------------------------------------------

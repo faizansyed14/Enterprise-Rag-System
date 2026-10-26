@@ -42,6 +42,12 @@ dependencies = [
     "regex>=2024.0.0",
     "sortedcontainers>=2.4.0",
     "PyPDF2>=3.0.0",
+    # shared cache and rate limits (optional at run time: without REDIS_URL everything keeps working in-process / in Postgres)
+    "redis>=5.2",
+    # AutoCAD drawings (rag.ingestion.cad): read DXF (a DWG is converted by LibreDWG's dwg2dxf first), draw sheets to SVG, and
+    # turn the SVG into PNG (needs libcairo2 in the image)
+    "ezdxf>=1.4",
+    "cairosvg>=2.7",
 ]
 
 [project.optional-dependencies]

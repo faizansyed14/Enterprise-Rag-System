@@ -7,6 +7,7 @@ import {
   CircleCheck,
   Copy,
   FileSearch,
+  Info,
   RotateCcw,
   ShieldAlert,
   ThumbsDown,
@@ -23,13 +24,36 @@ import { docTypeLabel, ms, pct } from "@/lib/format";
 import type { ChatMessage, Citation, PlanInfo } from "@/lib/types";
 
 import { AnswerText, citationOrder, plainAnswer } from "./answer-text";
+import { ActivityTrail } from "./activity";
 import { SourceCard } from "./source-card";
 
 export function UserMessage({ message }: { message: ChatMessage }) {
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast("Copying needs clipboard permission in this browser", "error");
+    }
+  };
   return (
     <div className="flex justify-end">
-      <div dir="auto" className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed text-bubble-user-fg">
-        {message.content}
+      <div className="flex max-w-[85%] flex-col items-end gap-1">
+        <div dir="auto" className="whitespace-pre-wrap rounded-2xl rounded-br-md bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed text-bubble-user-fg">
+          {message.content}
+        </div>
+        <button
+          type="button"
+          onClick={copy}
+          className="rounded-md p-1.5 text-muted hover:bg-surface-hover hover:text-foreground"
+          aria-label="Copy question"
+          title="Copy question"
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
       </div>
     </div>
   );
@@ -52,24 +76,6 @@ function PlanLine({ plan }: { plan: PlanInfo }) {
           {chip}
         </span>
       ))}
-    </div>
-  );
-}
-
-function Progress({ message }: { message: ChatMessage }) {
-  return (
-    <div className="space-y-1.5" aria-live="polite">
-      <div className="flex items-center gap-2 text-[13.5px] text-muted">
-        <span className="pulse-dot inline-block h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
-        {message.stageText || "Working"}
-      </div>
-      {message.steps?.length ? (
-        <ol className="ml-[3px] space-y-1 border-l border-border pl-4 text-[12.5px] text-muted">
-          {message.steps.map((step, i) => (
-            <li key={i}>{step}</li>
-          ))}
-        </ol>
-      ) : null}
     </div>
   );
 }
@@ -140,7 +146,19 @@ function Sources({
   );
 }
 
-function Footer({ message, order, isAdmin, showBadge }: { message: ChatMessage; order: Map<number, number>; isAdmin: boolean; showBadge: boolean }) {
+function Footer({
+  message,
+  order,
+  isAdmin,
+  showBadge,
+  onRetry,
+}: {
+  message: ChatMessage;
+  order: Map<number, number>;
+  isAdmin: boolean;
+  showBadge: boolean;
+  onRetry?: () => void;
+}) {
   const toast = useToast();
   const [score, setScore] = useState<number>(message.feedback_score ?? 0);
   const [copied, setCopied] = useState(false);
@@ -175,11 +193,11 @@ function Footer({ message, order, isAdmin, showBadge }: { message: ChatMessage; 
   };
 
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-muted">
+    <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border/70 pt-3 text-[12px] text-muted">
       {total ? (
         <span className={clsx("inline-flex items-center gap-1", verified === total ? "text-success" : "text-warning")} title="Quotes found on the cited pages">
           {verified === total ? <CircleCheck size={13} aria-hidden /> : <AlertTriangle size={13} aria-hidden />}
-          {verified} of {total} quotes found
+          {verified} of {total} quotes verified
         </span>
       ) : null}
       {message.groundedness !== null && message.groundedness !== undefined && total ? (
@@ -192,7 +210,7 @@ function Footer({ message, order, isAdmin, showBadge }: { message: ChatMessage; 
         </span>
       ) : null}
       {message.done?.timings_ms?.total ? <span className="tabular">{ms(message.done.timings_ms.total)}</span> : null}
-      <span className="ml-auto flex items-center gap-0.5">
+      <span className="ml-auto flex items-center gap-0.5 opacity-80 transition-opacity hover:opacity-100 focus-within:opacity-100">
         <button type="button" onClick={copy} className="rounded-md p-1.5 hover:bg-surface-hover hover:text-foreground" aria-label="Copy answer" title="Copy answer with sources">
           {copied ? <Check size={14} /> : <Copy size={14} />}
         </button>
@@ -206,6 +224,11 @@ function Footer({ message, order, isAdmin, showBadge }: { message: ChatMessage; 
             </button>
           </>
         ) : null}
+        {onRetry ? (
+          <button type="button" onClick={onRetry} className="rounded-md p-1.5 hover:bg-surface-hover hover:text-foreground" aria-label="Retry answer" title="Retry">
+            <RotateCcw size={14} />
+          </button>
+        ) : null}
         {isAdmin && message.trace_id ? (
           <Link href={`/monitor?trace=${message.trace_id}`} className="rounded-md p-1.5 hover:bg-surface-hover hover:text-foreground" aria-label="Open the trace for this answer" title="Trace">
             <Waypoints size={14} />
@@ -216,6 +239,26 @@ function Footer({ message, order, isAdmin, showBadge }: { message: ChatMessage; 
   );
 }
 
+function DetailsButton({ message, active, onClick }: { message: ChatMessage; active: boolean; onClick: () => void }) {
+  const steps = message.trace?.length ?? 0;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title="Every step of this answer: searches with their scores, files read, and each model call with what was sent and returned"
+      className={clsx(
+        "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[12px] transition-colors",
+        active ? "border-foreground/40 bg-surface-hover text-foreground" : "border-border text-muted hover:bg-surface-hover hover:text-foreground",
+      )}
+    >
+      {message.streaming ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" aria-hidden /> : <Info size={13} aria-hidden />}
+      Details
+      <span className="tabular text-[11px] text-muted">{steps}</span>
+    </button>
+  );
+}
+
 export function AssistantMessage({
   message,
   onOpen,
@@ -223,6 +266,8 @@ export function AssistantMessage({
   isAdmin,
   showBadge,
   onRetry,
+  onDetails,
+  detailsOpen = false,
 }: {
   message: ChatMessage;
   onOpen: (citation: Citation, display: number, messageKey: string) => void;
@@ -230,16 +275,31 @@ export function AssistantMessage({
   isAdmin: boolean;
   showBadge: boolean;
   onRetry?: () => void;
+  onDetails?: () => void;
+  detailsOpen?: boolean;
 }) {
   const order = citationOrder(message.content);
   const status = message.done?.status ?? message.status;
   const open = (c: Citation, display?: number) => onOpen(c, display ?? order.get(c.n) ?? c.n, message.key);
   const refused = message.errorCode === "guardrail" || status === "refused";
+  const details =
+    onDetails && (message.streaming || (message.trace?.length ?? 0) > 0) ? (
+      <DetailsButton message={message} active={detailsOpen} onClick={onDetails} />
+    ) : null;
 
   return (
-    <article className="min-w-0">
+    <article className="answer-enter min-w-0">
       {message.plan ? <PlanLine plan={message.plan} /> : null}
-      {message.streaming && !message.content ? <Progress message={message} /> : null}
+      {message.activities?.length ? (
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <ActivityTrail message={message} />
+          </div>
+          {details}
+        </div>
+      ) : details ? (
+        <div className="mb-3 flex justify-end">{details}</div>
+      ) : null}
       {message.content ? <AnswerText text={message.content} citations={message.citations} onOpen={(c) => open(c)} streaming={message.streaming} /> : null}
       {refused ? (
         <div className="flex items-start gap-2 rounded-xl border border-border px-4 py-3 text-[13.5px]">
@@ -271,7 +331,9 @@ export function AssistantMessage({
       {message.citations.length ? (
         <Sources citations={message.citations} order={order} activeKey={activeSourceKey} onOpen={open} />
       ) : null}
-      {!message.streaming && message.content && !refused ? <Footer message={message} order={order} isAdmin={isAdmin} showBadge={showBadge} /> : null}
+      {!message.streaming && message.content && !refused ? (
+        <Footer message={message} order={order} isAdmin={isAdmin} showBadge={showBadge} onRetry={onRetry} />
+      ) : null}
     </article>
   );
 }

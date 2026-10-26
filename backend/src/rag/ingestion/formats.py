@@ -11,8 +11,8 @@ import asyncio
 import email
 import email.policy
 import io
-import os
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -46,13 +46,31 @@ TEXT_EXTENSIONS = {"txt", "md", "markdown", "rst", "adoc", "csv", "tsv", "json",
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "gif"}
 LEGACY_OFFICE = {"doc": "docx", "xls": "xlsx", "ppt": "pptx", "ods": "xlsx", "odp": "pptx"}  # need LibreOffice
 NATIVE_EXTRA = {"rtf", "odt", "xer"}  # read natively (rag.ingestion.formats_extra)
+CAD_EXTENSIONS = {"dwg", "dxf"}  # AutoCAD drawings (rag.ingestion.cad)
 SUPPORTED = {"pdf", "docx", "xlsx", "xlsm", "pptx", "eml", "msg", "html", "htm", "zip", *TEXT_EXTENSIONS,
-             *IMAGE_EXTENSIONS, *LEGACY_OFFICE, *NATIVE_EXTRA}
+             *IMAGE_EXTENSIONS, *LEGACY_OFFICE, *NATIVE_EXTRA, *CAD_EXTENSIONS}
 
 
 def extension(name: str) -> str:
     suffix = PurePosixPath(name.lower()).suffix
     return suffix[1:] if suffix else ""
+
+
+_SKIP_REASONS = {
+    "dwg": "AutoCAD drawings (.dwg) are not processed",
+    "dxf": "AutoCAD drawings (.dxf) are not processed",
+    "jpg": "JPG/JPEG images are not processed yet",
+    "jpeg": "JPG/JPEG images are not processed yet",
+    "png": "PNG images are not processed yet",
+}
+
+
+def skip_reason(name: str, skipped: frozenset[str]) -> str | None:
+    """Why a file of a type listed in SKIP_EXTENSIONS is left out, or None when it is processed."""
+    ext = extension(name)
+    if ext and ext in skipped:
+        return _SKIP_REASONS.get(ext, f".{ext} files are not processed (SKIP_EXTENSIONS)")
+    return None
 
 
 def detect_format(data: bytes, name: str) -> str:
@@ -78,6 +96,12 @@ def detect_format(data: bytes, name: str) -> str:
         return "zip"
     if head.startswith(b"\xd0\xcf\x11\xe0"):  # OLE compound file: legacy Office or Outlook .msg
         return ext if ext in {"doc", "xls", "ppt", "msg"} else "doc"
+    from rag.ingestion.cad import is_dwg, is_dxf
+
+    if is_dwg(head):
+        return "dwg"
+    if ext == "dxf" or is_dxf(data[:64]):  # before the text check: a DXF file is text
+        return "dxf"
     kind = filetype.guess(data[:8192])
     if kind is not None and kind.extension in IMAGE_EXTENSIONS | {"jpg"}:
         return "image"
@@ -299,63 +323,82 @@ def read_xlsx(data: bytes) -> ParsedDocument:
     pages: list[ParsedPage] = []
     warnings: list[str] = []
 
-    def add_page(sheet: str, titles: list[str], header: list[str], body: list[tuple[int, list[str]]], *, first: bool, single: bool) -> None:
+    def add_page(sheet: str, titles: list[str], header: list[str], body: list[tuple[int, list[str]]], *,
+                 first: bool, single: bool) -> None:
         width = max([len(header)] + [len(cells) for _, cells in body])
-        rows = ([header + [""] * (width - len(header))] if header else []) + [cells + [""] * (width - len(cells)) for _, cells in body]
+        rows = ([header + [""] * (width - len(header))] if header else []) + [
+            cells + [""] * (width - len(cells)) for _, cells in body
+        ]
         table = ParsedTable(rows=rows, header_rows=1 if header else 0)  # no header: the cells are kept without column names
         # a sheet that fits on one page keeps the plain label; longer ones say which rows each page holds
         label = f"Sheet: {sheet}" if single or not body else f"Sheet: {sheet}, rows {body[0][0]:,}-{body[-1][0]:,}"
         text = "\n".join([label, *(titles if first else []), TABLE_MARKER.format(0)])
-        pages.append(ParsedPage(number=len(pages) + 1, text=text, method="native", tables=[table], label=label,
-                                language=detect_language(_table_text([table]))))
+        pages.append(
+            ParsedPage(
+                number=len(pages) + 1,
+                text=text,
+                method="native",
+                tables=[table],
+                label=label,
+                language=detect_language(_table_text([table])),
+            )
+        )
 
-    try:
-        for sheet in workbook.worksheets:
-            pending: list[tuple[int, list[str]]] = []  # the first rows, held until the header is found
-            header: list[str] | None = None
-            titles: list[str] = []
-            segment: list[tuple[int, list[str]]] = []
-            emitted = 0
+    def read_sheet(sheet: Any) -> None:
+        pending: list[tuple[int, list[str]]] = []  # the first rows, held until the header is found
+        header: list[str] | None = None
+        titles: list[str] = []
+        segment: list[tuple[int, list[str]]] = []
+        emitted = 0
 
-            def take(item: tuple[int, list[str]], sheet_title: str = sheet.title) -> None:
-                nonlocal emitted
-                segment.append(item)
-                if len(segment) >= ROWS_PER_PAGE:
-                    add_page(sheet_title, titles, header or [], segment, first=emitted == 0, single=False)
-                    emitted += 1
-                    segment.clear()
+        def take(item: tuple[int, list[str]]) -> None:
+            nonlocal emitted
+            segment.append(item)
+            if len(segment) >= ROWS_PER_PAGE:
+                add_page(sheet.title, titles, header or [], segment, first=emitted == 0, single=False)
+                emitted += 1
+                segment.clear()
 
-            for number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                if number > MAX_SHEET_ROWS:
-                    warnings.append(f"sheet {sheet.title}: only the first {MAX_SHEET_ROWS:,} rows were read")
-                    break
-                cells = ["" if v is None else _cell(v) for v in row]
-                while cells and not cells[-1]:
-                    cells.pop()
-                if not any(cells):
+        for number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            if number > MAX_SHEET_ROWS:
+                warnings.append(f"sheet {sheet.title}: only the first {MAX_SHEET_ROWS:,} rows were read")
+                break
+            cells = ["" if v is None else _cell(v) for v in row]
+            while cells and not cells[-1]:
+                cells.pop()
+            if not any(cells):
+                continue
+            if header is None:
+                pending.append((number, cells))
+                if len(pending) < HEADER_SCAN:
                     continue
-                if header is None:
-                    pending.append((number, cells))
-                    if len(pending) < HEADER_SCAN:
-                        continue
-                    titles, header, used = _split_header(pending)
-                    for item in pending[used:]:
-                        take(item)
-                    pending = []
-                    continue
-                take((number, cells))
-            if header is None and pending:
                 titles, header, used = _split_header(pending)
                 for item in pending[used:]:
                     take(item)
-            if header is not None and (segment or emitted == 0):
-                add_page(sheet.title, titles, header, segment, first=emitted == 0, single=emitted == 0)
+                pending = []
+                continue
+            take((number, cells))
+        if header is None and pending:
+            titles, header, used = _split_header(pending)
+            for item in pending[used:]:
+                take(item)
+        if header is not None and (segment or emitted == 0):
+            add_page(sheet.title, titles, header, segment, first=emitted == 0, single=emitted == 0)
+
+    try:
+        for sheet in workbook.worksheets:
+            read_sheet(sheet)
     finally:
         workbook.close()
     props = workbook.properties
     title = getattr(props, "title", None)
-    return ParsedDocument(pages=pages or [ParsedPage(number=1, text="", method="native")], format="xlsx",
-                          title=title, properties={"title": title} if title else {}, warnings=warnings)
+    return ParsedDocument(
+        pages=pages or [ParsedPage(number=1, text="", method="native")],
+        format="xlsx",
+        title=title,
+        properties={"title": title} if title else {},
+        warnings=warnings,
+    )
 
 
 def _cell(value: Any) -> str:
@@ -374,8 +417,18 @@ def read_csv(data: bytes) -> ParsedDocument:
     rows = [[clean_text(c) for c in row] for row in csv.reader(io.StringIO(text), dialect)]
     rows = [r for r in rows if any(r)][:MAX_SHEET_ROWS]
     table = ParsedTable(rows=rows)
-    return ParsedDocument(pages=[ParsedPage(number=1, text=TABLE_MARKER.format(0), method="native", tables=[table],
-                                            language=detect_language(_table_text([table])))], format="text")
+    return ParsedDocument(
+        pages=[
+            ParsedPage(
+                number=1,
+                text=TABLE_MARKER.format(0),
+                method="native",
+                tables=[table],
+                language=detect_language(_table_text([table])),
+            )
+        ],
+        format="text",
+    )
 
 
 # ---- PPTX ------------------------------------------------------------------------------------------------------------
@@ -408,11 +461,18 @@ def read_pptx(data: bytes) -> ParsedDocument:
             if notes:
                 lines.append("Notes: " + notes)
         text = clean_text("\n".join(lines))
-        pages.append(ParsedPage(number=number, text=text, method="native", tables=tables, label=f"Slide {number}",
-                                language=detect_language(text)))
+        pages.append(
+            ParsedPage(
+                number=number, text=text, method="native", tables=tables, label=f"Slide {number}", language=detect_language(text)
+            )
+        )
     title = deck.core_properties.title or None
-    return ParsedDocument(pages=pages or [ParsedPage(number=1, text="", method="native")], format="pptx", title=title,
-                          properties={"title": title} if title else {})
+    return ParsedDocument(
+        pages=pages or [ParsedPage(number=1, text="", method="native")],
+        format="pptx",
+        title=title,
+        properties={"title": title} if title else {},
+    )
 
 
 # ---- e-mail, HTML, text ------------------------------------------------------------------------------------------------
@@ -466,10 +526,13 @@ def read_email(data: bytes) -> ParsedDocument:
             attachments.append((name, payload))
     text = clean_text("\n".join(headers) + "\n\n" + body_text)
     subject = str(message["Subject"] or "") or None
-    return ParsedDocument(pages=[ParsedPage(number=1, text=text, method="native", tables=tables,
-                                            language=detect_language(body_text or text))],
-                          format="email", title=subject, properties={"title": subject or ""},
-                          attachments=attachments)
+    return ParsedDocument(
+        pages=[ParsedPage(number=1, text=text, method="native", tables=tables, language=detect_language(body_text or text))],
+        format="email",
+        title=subject,
+        properties={"title": subject or ""},
+        attachments=attachments,
+    )
 
 
 def read_msg(data: bytes) -> ParsedDocument:
@@ -483,13 +546,19 @@ def read_msg(data: bytes) -> ParsedDocument:
         msg = extract_msg.Message(str(path))
         try:
             headers = [f"From: {msg.sender}", f"To: {msg.to}", f"Date: {msg.date}", f"Subject: {msg.subject}"]
-            attachments = [(a.longFilename or a.shortFilename or "attachment.bin", a.data)
-                           for a in msg.attachments if isinstance(getattr(a, "data", None), bytes)]
+            attachments = [
+                (a.longFilename or a.shortFilename or "attachment.bin", a.data)
+                for a in msg.attachments
+                if isinstance(getattr(a, "data", None), bytes)
+            ]
             text = clean_text("\n".join(headers) + "\n\n" + (msg.body or ""))
-            return ParsedDocument(pages=[ParsedPage(number=1, text=text, method="native",
-                                                    language=detect_language(text))],
-                                  format="email", title=msg.subject, properties={"title": msg.subject or ""},
-                                  attachments=attachments)
+            return ParsedDocument(
+                pages=[ParsedPage(number=1, text=text, method="native", language=detect_language(text))],
+                format="email",
+                title=msg.subject,
+                properties={"title": msg.subject or ""},
+                attachments=attachments,
+            )
         finally:
             msg.close()
 
@@ -518,8 +587,9 @@ def read_zip(data: bytes) -> ParsedDocument:
                 continue
             attachments.append((str(name), zf.read(info)))
     listing = "\n".join(f"- {n}" for n, _ in attachments[:500])
-    return ParsedDocument(pages=[ParsedPage(number=1, text="Archive contents:\n" + listing, method="native")],
-                          format="zip", attachments=attachments)
+    return ParsedDocument(
+        pages=[ParsedPage(number=1, text="Archive contents:\n" + listing, method="native")], format="zip", attachments=attachments
+    )
 
 
 def convert_legacy(data: bytes, ext: str, timeout_s: int = 180) -> tuple[bytes, str]:
@@ -533,8 +603,17 @@ def convert_legacy(data: bytes, ext: str, timeout_s: int = 180) -> tuple[bytes, 
         # Every conversion gets its own LibreOffice profile: two conversions at once share (and lock) the default profile, and
         # the second one then fails or produces nothing. HOME is also pointed at the temporary folder (the worker's is read-only).
         profile = Path(tmp) / "profile"
-        cmd = [soffice, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--norestore", "--convert-to", target,
-               "--outdir", tmp, str(src)]
+        cmd = [
+            soffice,
+            f"-env:UserInstallation={profile.as_uri()}",
+            "--headless",
+            "--norestore",
+            "--convert-to",
+            target,
+            "--outdir",
+            tmp,
+            str(src),
+        ]
         env = {**os.environ, "HOME": tmp}
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=timeout_s, env=env)  # noqa: S603 - fixed argv
@@ -542,8 +621,10 @@ def convert_legacy(data: bytes, ext: str, timeout_s: int = 180) -> tuple[bytes, 
             raise PermanentError(f"LibreOffice could not convert the .{ext} file") from exc
         out = Path(tmp) / f"input.{target}"
         if not out.is_file():
-            raise PermanentError(f"LibreOffice could not open the .{ext} file: it is probably password-protected or damaged "
-                                 "(remove the password, or save it again as .xlsx, and upload it again)")
+            raise PermanentError(
+                f"LibreOffice could not open the .{ext} file: it is probably password-protected or damaged "
+                "(remove the password, or save it again as .xlsx, and upload it again)"
+            )
         return out.read_bytes(), target
 
 
@@ -561,11 +642,40 @@ async def read_image(data: bytes, ocr: Any) -> ParsedDocument:
         buffer = io.BytesIO()
         frame.save(buffer, format="PNG")
         result: OCRResult = await ocr.recognize(buffer.getvalue()) if ocr else OCRResult(text="")
-        pages.append(ParsedPage(number=number, text=clean_text(result.text), method="ocr" if ocr else "empty",
-                                lines=[TextLine(t.text, t.box, t.confidence) for t in result.lines],
-                                width=float(width), height=float(height), language=detect_language(result.text),
-                                quality={"ocr_confidence": result.confidence}))
+        pages.append(
+            ParsedPage(
+                number=number,
+                text=clean_text(result.text),
+                method="ocr" if ocr else "empty",
+                lines=[TextLine(t.text, t.box, t.confidence) for t in result.lines],
+                width=float(width),
+                height=float(height),
+                language=detect_language(result.text),
+                quality={"ocr_confidence": result.confidence},
+            )
+        )
     return ParsedDocument(pages=pages, format="image")
+
+
+async def read_cad(data: bytes, kind: str, pdf_parser: Any) -> ParsedDocument:
+    """An AutoCAD drawing: text and title block from the file, each sheet drawn, and explained by the vision model the PDF
+    reader was given (with its daily page budget and its privacy rule; none when the file is read with local OCR only)."""
+    from rag.ingestion import cad, cad_analysis
+
+    options = getattr(pdf_parser, "cad", None)  # set when CAD_VISION is usable: the sheets get their own, fuller analysis
+    analyse = options is not None and options.model is not None and options.max_sheets > 0
+    parsed, images, hires = await asyncio.to_thread(
+        cad.read_full, data, kind, analysis_sheets=options.max_sheets if analyse else 0,
+        analysis_px=options.render_px if analyse else 6000, analysis_colour=options.colour if analyse else True,
+        preview_colour=getattr(getattr(pdf_parser, "settings", None), "cad_colour", True))  # CAD_COLOUR: viewer and analysis
+    take_budget = getattr(pdf_parser, "take_budget", None)
+    protect_kinds = getattr(pdf_parser, "protect_kinds", None)
+    analysed = (await cad_analysis.analyze_sheets(parsed, hires, options, take_budget=take_budget, protect_kinds=protect_kinds)
+                if analyse else set())
+    await cad.describe_sheets(parsed, images, getattr(pdf_parser, "vision", None), take_budget=take_budget,
+                              protect_kinds=protect_kinds, skip=analysed)
+    parsed.previews = images
+    return parsed
 
 
 async def parse_document(data: bytes, name: str, *, pdf_parser: Any, ocr: Any) -> ParsedDocument:
@@ -578,11 +688,22 @@ async def parse_document(data: bytes, name: str, *, pdf_parser: Any, ocr: Any) -
         return await pdf_parser.parse_pdf(data, name)
     if kind == "image":
         return await read_image(data, ocr)
+    if kind in CAD_EXTENSIONS:
+        return await read_cad(data, kind, pdf_parser)
     from rag.ingestion import formats_extra
 
-    readers = {"docx": read_docx, "xlsx": read_xlsx, "pptx": read_pptx, "html": read_html, "email": read_email,
-               "msg": read_msg, "zip": read_zip, "rtf": formats_extra.read_rtf, "odt": formats_extra.read_odt,
-               "xer": formats_extra.read_xer}
+    readers = {
+        "docx": read_docx,
+        "xlsx": read_xlsx,
+        "pptx": read_pptx,
+        "html": read_html,
+        "email": read_email,
+        "msg": read_msg,
+        "zip": read_zip,
+        "rtf": formats_extra.read_rtf,
+        "odt": formats_extra.read_odt,
+        "xer": formats_extra.read_xer,
+    }
     if kind == "text":
         return await asyncio.to_thread(read_text, data, name)
     reader = readers.get(kind)

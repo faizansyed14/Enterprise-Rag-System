@@ -135,6 +135,16 @@
       <div class="hero-note"><strong>How to read this page</strong><br>Solid cards are normal stages. Dashed cards are optional or fallback routes. Blue is ingestion/storage; purple is the question path; green marks a publish or access boundary.</div>
     </header>
 
+    <div class="branch" style="margin-top:18px;border-color:#9a6a25;background:#fff7e8">
+      <h4>Update 2026-10-23: this page is an overview from the first commit</h4>
+      <p>The detailed, code-checked documents are now <a href="architecture.md">architecture.md</a>, <a href="data-flows.md">data-flows.md</a>
+      and <a href="codebase-map.md">codebase-map.md</a>. Added since this page was written: AutoCAD DWG/DXF reading (<code>ingestion/cad.py</code>),
+      ZIP upload staging with file selection (<code>ingestion/archive.py</code>), password-protected file detection (<code>ingestion/protection.py</code>),
+      answer strategies (<code>answering/strategy.py</code>, <code>aggregate.py</code>), the live per-answer Details panel (<code>monitoring/inspector.py</code>)
+      and the vision fallback model. One correction to step 9 below: ordinary documents become searchable one by one through the <code>publish</code> job
+      (the Qdrant payload flag <code>published</code>). The new-collection-then-alias swap applies only to a full index rebuild.</p>
+    </div>
+
     <nav class="nav" aria-label="Page sections">
       <a href="#map">At a glance</a>
       <a href="#tree">Flow tree</a><a href="#ingestion">Ingestion</a>

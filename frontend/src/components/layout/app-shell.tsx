@@ -24,7 +24,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode 
 
 import { Wordmark } from "@/components/brand/brand";
 import { CONVERSATIONS_CHANGED, NEW_CHAT } from "@/components/layout/events";
-import { IconButton } from "@/components/ui/button";
+import { Button, IconButton } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/feedback";
 import { api } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
@@ -48,11 +48,15 @@ function ConversationList({ onNavigate }: { onNavigate: () => void }) {
   const router = useRouter();
   const [items, setItems] = useState<ConversationSummary[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(() => {
     api<{ conversations: ConversationSummary[] }>("/conversations?limit=40")
-      .then((d) => setItems(d.conversations))
-      .catch(() => undefined);
+      .then((d) => {
+        setItems(d.conversations);
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
   }, []);
 
   useEffect(() => {
@@ -74,6 +78,9 @@ function ConversationList({ onNavigate }: { onNavigate: () => void }) {
     }
   };
 
+  if (loadError && !items.length) {
+    return <p className="px-3 py-2 text-[12.5px] text-sidebar-muted">Could not load conversations.</p>;
+  }
   if (!items.length) {
     return <p className="px-3 py-2 text-[12.5px] text-sidebar-muted">Your conversations will be listed here.</p>;
   }
@@ -86,12 +93,12 @@ function ConversationList({ onNavigate }: { onNavigate: () => void }) {
             <li key={c.id} className="rounded-lg bg-sidebar-hover px-3 py-2 text-[12.5px]">
               <div className="truncate text-sidebar-fg">Delete “{c.title}”?</div>
               <div className="mt-1.5 flex gap-1.5">
-                <button type="button" onClick={() => remove(c.id)} className="rounded-md bg-danger px-2 py-0.5 font-medium text-white">
+                <Button size="sm" variant="danger" onClick={() => remove(c.id)}>
                   Delete
-                </button>
-                <button type="button" onClick={() => setConfirming(null)} className="rounded-md px-2 py-0.5 text-sidebar-muted hover:text-sidebar-fg">
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirming(null)} className="text-sidebar-muted hover:text-sidebar-fg">
                   Keep
-                </button>
+                </Button>
               </div>
             </li>
           );
@@ -101,19 +108,23 @@ function ConversationList({ onNavigate }: { onNavigate: () => void }) {
             <Link
               href={`/c/${c.id}`}
               onClick={onNavigate}
+              aria-current={active ? "page" : undefined}
               className={clsx(
-                "block rounded-lg py-1.5 pl-3 pr-8 text-[13px] transition-colors",
-                active ? "bg-sidebar-active text-sidebar-fg" : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-fg",
+                "block rounded-lg py-1.5 pl-3 pr-8 text-[13px] transition-colors duration-150",
+                active
+                  ? "bg-sidebar-active font-medium text-sidebar-fg ring-1 ring-inset ring-sidebar-border"
+                  : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-fg",
               )}
               title={`${c.title} (${relativeTime(c.updated_at)})`}
             >
               <span className="block truncate">{c.title}</span>
+              <span className="block truncate text-[11.5px] opacity-80">{relativeTime(c.updated_at)}</span>
             </Link>
             <button
               type="button"
               onClick={() => setConfirming(c.id)}
               aria-label={`Delete conversation ${c.title}`}
-              className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-md p-1 text-sidebar-muted hover:text-sidebar-fg focus:block group-hover:block"
+              className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-md p-1 text-sidebar-muted hover:text-sidebar-fg focus-visible:block group-hover:block"
             >
               <Trash2 size={13} />
             </button>
@@ -179,23 +190,33 @@ export function AppShell({ children }: { children: ReactNode }) {
         </button>
       </div>
       <nav className="mt-4 space-y-px px-3" aria-label="Main">
-        {nav.map((item) => {
+        {nav.map((item, index) => {
           const active = item.href === "/" ? chatRoute : pathname.startsWith(item.href);
           const Icon = item.icon;
+          const prev = nav[index - 1];
+          const showAdminDivider = item.admin && prev && !prev.admin;
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              onClick={item.href === "/" ? () => window.dispatchEvent(new Event(NEW_CHAT)) : undefined}
-              aria-current={active ? "page" : undefined}
-              className={clsx(
-                "flex h-8 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors",
-                active ? "bg-sidebar-active font-medium text-sidebar-fg" : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-fg",
-              )}
-            >
-              <Icon size={15} strokeWidth={1.7} aria-hidden />
-              {item.label}
-            </Link>
+            <div key={item.href}>
+              {showAdminDivider ? (
+                <div className="mb-1 mt-3 px-3 text-[11px] font-medium uppercase tracking-[0.04em] text-sidebar-muted">
+                  Administration
+                </div>
+              ) : null}
+              <Link
+                href={item.href}
+                onClick={item.href === "/" ? () => window.dispatchEvent(new Event(NEW_CHAT)) : undefined}
+                aria-current={active ? "page" : undefined}
+                className={clsx(
+                  "flex h-8 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors duration-150",
+                  active
+                    ? "bg-sidebar-active font-medium text-sidebar-fg ring-1 ring-inset ring-sidebar-border"
+                    : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-fg",
+                )}
+              >
+                <Icon size={15} strokeWidth={1.7} aria-hidden />
+                {item.label}
+              </Link>
+            </div>
           );
         })}
       </nav>
@@ -234,7 +255,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {!user.is_admin && ADMIN_ROUTES.some((href) => pathname.startsWith(href)) ? (
-            <EmptyState title="Administrators only">This page manages sources, models and users. Ask an administrator if you need something changed.</EmptyState>
+            <EmptyState title="Administrators only">This page is for administrators. Ask one if you need sources, monitoring, evaluation, or users changed.</EmptyState>
           ) : (
             children
           )}

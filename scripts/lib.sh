@@ -64,6 +64,7 @@ ensure_env() {
     env_set DATABASE_URL "postgresql://$(env_get POSTGRES_USER):$secret@localhost:5432/$(env_get POSTGRES_DB)"
   fi
   [ -n "$(env_get QDRANT_API_KEY)" ] || env_set QDRANT_API_KEY "$(random_secret 24)"
+  [ -n "$(env_get REDIS_PASSWORD)" ] || env_set REDIS_PASSWORD "$(random_secret 24)"
   [ -n "$(env_get LOCAL_MODELS_TOKEN)" ] || env_set LOCAL_MODELS_TOKEN "$(random_secret 24)"
   [ -n "$(env_get GRAFANA_ADMIN_PASSWORD)" ] || env_set GRAFANA_ADMIN_PASSWORD "$(random_secret 12)"
   if [ -n "$(env_get BOOTSTRAP_ADMIN_EMAIL)" ] && [ -z "$(env_get BOOTSTRAP_ADMIN_PASSWORD)" ]; then
